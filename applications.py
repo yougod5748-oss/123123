@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
+import traceback
 
 import aiosqlite
 import disnake
@@ -1537,6 +1539,11 @@ def _build_academy_overwrites(
             manage_messages=True,
             manage_threads=True,
             manage_channels=True,
+            # Без этого права бот не сможет создавать ветки в канале,
+            # даже имея `manage_threads` (Discord различает CREATE_*_THREADS
+            # и MANAGE_THREADS).
+            create_public_threads=True,
+            create_private_threads=True,
         )
     recruit_role = guild.get_role(RECRUITMENT_ROLE_ID)
     if recruit_role is not None:
@@ -1547,18 +1554,25 @@ def _build_academy_overwrites(
             send_messages_in_threads=True,
             manage_messages=True,
             manage_threads=True,
+            create_public_threads=True,
+            create_private_threads=True,
         )
     return overwrites
 
 
 async def _ensure_academy_threads(
     channel: disnake.TextChannel,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """Создаёт недостающие ветки `ACADEMY_THREAD_NAMES` в канале.
 
-    Возвращает список имён реально созданных веток. Если ничего
-    создавать не пришлось — возвращает пустой список. Активные и
-    архивные ветки учитываются, регистр имени игнорируется.
+    Возвращает кортеж ``(created, errors)``:
+    * ``created`` — имена реально созданных веток;
+    * ``errors`` — строки вида ``"имя: текст ошибки"`` для веток, которые
+      не удалось создать (показывает причину — Forbidden, лимит и т.п.).
+
+    Активные и архивные ветки учитываются (регистр имени игнорируется).
+    Между запросами на создание стоит маленькая пауза, чтобы не словить
+    rate-limit от Discord.
     """
     existing_names: set[str] = set()
     for t in getattr(channel, "threads", []):
@@ -1573,23 +1587,55 @@ async def _ensure_academy_threads(
         )
 
     created: list[str] = []
-    for name in ACADEMY_THREAD_NAMES:
+    errors: list[str] = []
+
+    # Discord поддерживает 10080 (неделя) для всех серверов c 2022,
+    # но на старых boost-тирах могут быть жесты — fallback'ы на случай.
+    duration_candidates = (10080, 4320, 1440, 60)
+
+    for idx, name in enumerate(ACADEMY_THREAD_NAMES):
         if name.casefold() in existing_names:
             continue
-        try:
-            await channel.create_thread(
-                name=name,
-                type=disnake.ChannelType.public_thread,
-                auto_archive_duration=10080,  # 7 дней
-                reason="academy: восстановление личной ветки",
-            )
+
+        last_exc: Exception | None = None
+        ok = False
+        for duration in duration_candidates:
+            try:
+                await channel.create_thread(
+                    name=name,
+                    type=disnake.ChannelType.public_thread,
+                    auto_archive_duration=duration,
+                    reason="academy: восстановление личной ветки",
+                )
+                ok = True
+                break
+            except disnake.HTTPException as ex:
+                last_exc = ex
+                # 50035 = Invalid Form Body (часто на auto_archive_duration).
+                # 50013 = Missing Permissions — менять duration бесполезно.
+                if getattr(ex, "code", None) == 50013:
+                    break
+                continue
+            except Exception as ex:
+                last_exc = ex
+                break
+
+        if ok:
             created.append(name)
-        except Exception as ex:
+        else:
+            err_repr = repr(last_exc) if last_exc else "unknown"
+            errors.append(f"{name}: {err_repr}")
             print(
                 f"[academy] create_thread {name!r} in "
-                f"{channel.name!r} failed: {ex!r}"
+                f"{channel.name!r} failed: {err_repr}\n"
+                + (traceback.format_exc() if last_exc else "")
             )
-    return created
+
+        # Небольшая пауза между запросами, чтобы не словить 429.
+        if idx < len(ACADEMY_THREAD_NAMES) - 1:
+            await asyncio.sleep(0.4)
+
+    return created, errors
 
 
 async def _resolve_academy_candidate(
@@ -1811,19 +1857,15 @@ async def _setup_academy_channel(
         print(f"[academy] send main embed failed: {ex!r}")
 
     # Создаём публичные ветки (РП / Арена / Общение с рекрутёром).
-    for thread_name in ACADEMY_THREAD_NAMES:
-        try:
-            await channel.create_thread(
-                name=thread_name,
-                type=disnake.ChannelType.public_thread,
-                auto_archive_duration=10080,  # 7 дней
-                reason="academy: личные ветки кандидата",
-            )
-        except Exception as ex:
-            print(
-                f"[academy] thread '{thread_name}' creation failed: "
-                f"{ex!r}"
-            )
+    # Используем общий helper, чтобы логика создания была единой
+    # (повторные попытки duration, паузы между запросами, лог).
+    try:
+        await _ensure_academy_threads(channel)
+    except Exception as ex:
+        print(
+            f"[academy] ensure threads for {channel.name!r} failed: "
+            f"{ex!r}"
+        )
 
     return channel
 
@@ -3254,6 +3296,7 @@ class ApplicationsCog(commands.Cog):
         moved: list[str] = []
         renamed: list[str] = []
         threads_fixed: list[str] = []
+        thread_errors: list[str] = []
         skipped: list[str] = []
 
         for ch in list(category.text_channels):
@@ -3366,12 +3409,18 @@ class ApplicationsCog(commands.Cog):
 
             # Восстанавливаем пропавшие ветки + пинг-извинение.
             try:
-                created_threads = await _ensure_academy_threads(ch)
+                created_threads, errs = await _ensure_academy_threads(
+                    ch
+                )
             except Exception as ex:
                 print(
                     f"[fix_academy] threads {ch.name!r} failed: {ex!r}"
                 )
-                created_threads = []
+                created_threads, errs = [], [f"all: {ex!r}"]
+
+            if errs:
+                for err in errs:
+                    thread_errors.append(f"`{ch.name}` → {err}")
 
             if created_threads:
                 threads_fixed.append(ch.name)
@@ -3404,6 +3453,7 @@ class ApplicationsCog(commands.Cog):
             f"Перенесено по роли: **{len(moved)}**",
             f"Переименовано: **{len(renamed)}**",
             f"Восстановлены ветки: **{len(threads_fixed)}**",
+            f"Ошибок создания веток: **{len(thread_errors)}**",
             f"Пропущено (не нашёл кандидата): **{len(skipped)}**",
         ]
         if deleted:
@@ -3412,6 +3462,16 @@ class ApplicationsCog(commands.Cog):
                 + (
                     f" и ещё {len(deleted) - 15}..."
                     if len(deleted) > 15
+                    else ""
+                )
+            )
+        if thread_errors:
+            head = thread_errors[:8]
+            report_lines.append(
+                "_Ошибки веток:_\n" + "\n".join(head)
+                + (
+                    f"\n... и ещё {len(thread_errors) - 8}"
+                    if len(thread_errors) > 8
                     else ""
                 )
             )
