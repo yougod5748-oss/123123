@@ -1355,6 +1355,35 @@ def _author_is_academy_moderator(member: disnake.Member | None) -> bool:
     return any(r.id in allowed for r in member.roles)
 
 
+def _is_channel_in_category_chain(
+    guild: disnake.Guild,
+    channel: disnake.TextChannel,
+    base_category_id: int,
+) -> bool:
+    """Принадлежит ли канал «цепочке» категории base_category_id.
+
+    Цепочка = базовая категория + её клоны вида `<name>-2`, `<name>-3`...
+    (создаются при переполнении). Используется в `/fix_academy`,
+    чтобы понять, нужно ли переносить канал в другую категорию.
+    """
+    base = guild.get_channel(int(base_category_id))
+    if not isinstance(base, disnake.CategoryChannel):
+        return False
+    if channel.category_id == base.id:
+        return True
+    if channel.category is None:
+        return False
+    base_name = base.name.lower()
+    cur_name = channel.category.name.lower()
+    if cur_name == base_name:
+        return True
+    if cur_name.startswith(base_name + "-"):
+        suffix = cur_name[len(base_name) + 1:]
+        if suffix.isdigit():
+            return True
+    return False
+
+
 async def _pick_category_with_slots(
     guild: disnake.Guild,
     base_category_id: int,
@@ -1522,6 +1551,47 @@ def _build_academy_overwrites(
     return overwrites
 
 
+async def _ensure_academy_threads(
+    channel: disnake.TextChannel,
+) -> list[str]:
+    """Создаёт недостающие ветки `ACADEMY_THREAD_NAMES` в канале.
+
+    Возвращает список имён реально созданных веток. Если ничего
+    создавать не пришлось — возвращает пустой список. Активные и
+    архивные ветки учитываются, регистр имени игнорируется.
+    """
+    existing_names: set[str] = set()
+    for t in getattr(channel, "threads", []):
+        existing_names.add(t.name.casefold())
+    try:
+        async for t in channel.archived_threads(limit=100):
+            existing_names.add(t.name.casefold())
+    except Exception as ex:
+        print(
+            f"[academy] archived_threads {channel.name!r} failed: "
+            f"{ex!r}"
+        )
+
+    created: list[str] = []
+    for name in ACADEMY_THREAD_NAMES:
+        if name.casefold() in existing_names:
+            continue
+        try:
+            await channel.create_thread(
+                name=name,
+                type=disnake.ChannelType.public_thread,
+                auto_archive_duration=10080,  # 7 дней
+                reason="academy: восстановление личной ветки",
+            )
+            created.append(name)
+        except Exception as ex:
+            print(
+                f"[academy] create_thread {name!r} in "
+                f"{channel.name!r} failed: {ex!r}"
+            )
+    return created
+
+
 async def _resolve_academy_candidate(
     guild: disnake.Guild,
     channel: disnake.TextChannel,
@@ -1589,13 +1659,32 @@ async def _refresh_academy_card_message(
     сообщения «thread_created» от Discord НЕ удаляет саму ветку — ветки
     это отдельные сущности со своими ID, они выживают чистку.
     """
+    def _is_safe_to_delete(m: disnake.Message) -> bool:
+        """Безопасно ли удалять сообщение без повреждения веток.
+
+        Discord удаляет ветку вместе с её anchor-сообщением
+        (или сообщением, из которого ветка была создана). Чтобы
+        ветки НЕ пропадали, никогда не удаляем системные
+        thread_created и сообщения с флагом has_thread/атрибутом .thread.
+        """
+        if m.type != disnake.MessageType.default:
+            return False
+        try:
+            if getattr(m.flags, "has_thread", False):
+                return False
+        except Exception:
+            pass
+        if getattr(m, "thread", None) is not None:
+            return False
+        return True
+
     bot_msgs: list[disnake.Message] = []
     async for msg in channel.history(limit=100, oldest_first=True):
         if msg.author.id != bot_id:
             continue
         bot_msgs.append(msg)
 
-    # Пытаемся найти живую карточку (бот + V2 + components).
+    # Пытаемся найти живую карточку (бот + default + components).
     target_msg: disnake.Message | None = None
     for m in bot_msgs:
         if m.type != disnake.MessageType.default:
@@ -1624,11 +1713,13 @@ async def _refresh_academy_card_message(
             edited_in_place = False
 
     if edited_in_place:
-        # Карточка обновлена на своём месте — убираем все прочие
-        # ботовские сообщения (старый плавающий текст правил),
-        # включая системные thread_created. Ветки остаются.
+        # Карточка обновлена на своём месте. Чистим только
+        # «безопасные» ботовские текстовые сообщения (без веток),
+        # чтобы случайно не удалить thread-anchor.
         for m in bot_msgs:
             if m.id == target_msg.id:
+                continue
+            if not _is_safe_to_delete(m):
                 continue
             try:
                 await m.delete()
@@ -1640,10 +1731,12 @@ async def _refresh_academy_card_message(
         return "edited"
 
     # Редактировать не получилось или V2-сообщения не было:
-    # чистим всё ботовское и шлём эмбед «с нуля» — он станет
-    # единственным ботовским сообщением в канале и визуально ±вверху.
-    had_msgs = bool(bot_msgs)
+    # чистим ботовские default-сообщения (без anchor-веток) и
+    # шлём эмбед «с нуля». Системные thread_created остаются.
+    had_msgs = any(_is_safe_to_delete(m) for m in bot_msgs)
     for m in bot_msgs:
+        if not _is_safe_to_delete(m):
+            continue
         try:
             await m.delete()
         except Exception as ex:
@@ -3158,6 +3251,9 @@ class ApplicationsCog(commands.Cog):
         deleted: list[str] = []
         updated: list[str] = []
         recreated: list[str] = []
+        moved: list[str] = []
+        renamed: list[str] = []
+        threads_fixed: list[str] = []
         skipped: list[str] = []
 
         for ch in list(category.text_channels):
@@ -3165,12 +3261,17 @@ class ApplicationsCog(commands.Cog):
                 inter.guild, ch, bot_id
             )
 
-            has_role = False
-            if member is not None:
-                if young_role and young_role in member.roles:
-                    has_role = True
-                if academy_role and academy_role in member.roles:
-                    has_role = True
+            is_academy = bool(
+                member
+                and academy_role
+                and academy_role in member.roles
+            )
+            is_young = bool(
+                member
+                and young_role
+                and young_role in member.roles
+            )
+            has_role = is_academy or is_young
 
             if member is None:
                 skipped.append(ch.name)
@@ -3192,26 +3293,60 @@ class ApplicationsCog(commands.Cog):
                     )
                 continue
 
-            # Синхронизируем overwrites и topic (в topic кладём user_id
-            # для будущих вызовов).
-            try:
-                await ch.edit(
-                    overwrites=_build_academy_overwrites(
-                        inter.guild, member
-                    ),
-                    topic=str(member.id),
-                    reason="fix_academy: сброс доступа/топика",
-                )
-            except Exception as ex:
-                print(
-                    f"[fix_academy] reset overwrites {ch.name!r} "
-                    f"failed: {ex!r}"
+            # Определяем целевую категорию и имя по роли. ACADEMY
+            # выигрывает у YOUNG, если обе роли одновременно.
+            if is_academy:
+                target_base_id = ACADEMY_CATEGORY_ID
+                target_prefix = "академ"
+            else:
+                target_base_id = YOUNG_CATEGORY_ID
+                target_prefix = "young"
+
+            target_name = (
+                f"{target_prefix}-"
+                f"{_normalize_channel_name(member.display_name)}"
+            )[:95]
+
+            # Если канал не в нужной категории — переносим.
+            new_category: disnake.CategoryChannel | None = None
+            if not _is_channel_in_category_chain(
+                inter.guild, ch, target_base_id
+            ):
+                new_category = await _pick_category_with_slots(
+                    inter.guild, target_base_id
                 )
 
+            edit_kwargs: dict = {
+                "overwrites": _build_academy_overwrites(
+                    inter.guild, member
+                ),
+                "topic": str(member.id),
+                "reason": (
+                    "fix_academy: синхронизация категории/имени/"
+                    "доступа"
+                ),
+            }
+            if new_category is not None:
+                edit_kwargs["category"] = new_category
+            if ch.name != target_name:
+                edit_kwargs["name"] = target_name
+
+            try:
+                await ch.edit(**edit_kwargs)
+            except Exception as ex:
+                print(
+                    f"[fix_academy] edit {ch.name!r} failed: {ex!r}"
+                )
+            else:
+                if new_category is not None:
+                    moved.append(target_name)
+                if "name" in edit_kwargs:
+                    renamed.append(target_name)
+
             footer = None
-            if academy_role and academy_role in member.roles:
+            if is_academy:
                 footer = "**Этап:** ACADEMY (2 часть)"
-            elif young_role and young_role in member.roles:
+            elif is_young:
                 footer = "**Этап:** YOUNG (1 часть)"
 
             try:
@@ -3229,11 +3364,46 @@ class ApplicationsCog(commands.Cog):
             elif result == "recreated":
                 recreated.append(ch.name)
 
+            # Восстанавливаем пропавшие ветки + пинг-извинение.
+            try:
+                created_threads = await _ensure_academy_threads(ch)
+            except Exception as ex:
+                print(
+                    f"[fix_academy] threads {ch.name!r} failed: {ex!r}"
+                )
+                created_threads = []
+
+            if created_threads:
+                threads_fixed.append(ch.name)
+                try:
+                    await ch.send(
+                        content=(
+                            f"{e('WARNING')} {member.mention}, "
+                            f"извини — произошёл сбой, ветки "
+                            f"были удалены. Автоматически "
+                            f"восстановил: "
+                            f"{', '.join(created_threads)}."
+                        ),
+                        allowed_mentions=disnake.AllowedMentions(
+                            users=[member],
+                            roles=False,
+                            everyone=False,
+                        ),
+                    )
+                except Exception as ex:
+                    print(
+                        f"[fix_academy] apology send {ch.name!r} "
+                        f"failed: {ex!r}"
+                    )
+
         report_lines = [
             f"**Категория:** {category.mention}",
             f"Удалено: **{len(deleted)}**",
             f"Обновлено карточек: **{len(updated)}**",
             f"Пересоздано эмбедов: **{len(recreated)}**",
+            f"Перенесено по роли: **{len(moved)}**",
+            f"Переименовано: **{len(renamed)}**",
+            f"Восстановлены ветки: **{len(threads_fixed)}**",
             f"Пропущено (не нашёл кандидата): **{len(skipped)}**",
         ]
         if deleted:
