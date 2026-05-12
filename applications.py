@@ -1522,6 +1522,120 @@ def _build_academy_overwrites(
     return overwrites
 
 
+async def _resolve_academy_candidate(
+    guild: disnake.Guild,
+    channel: disnake.TextChannel,
+    bot_id: int,
+) -> disnake.Member | None:
+    """Определяет владельца академического канала.
+
+    1. Пытается прочитать ID из `channel.topic` (бот кладёт его при
+       создании).
+    2. Если в topic пусто/мусор — сканирует permission overwrites
+       канала: ищет первый `Member` overrride, не являющийся ботом, с
+       разрешением `view_channel`.
+    """
+    topic = (channel.topic or "").strip()
+    try:
+        target_id = int(topic)
+    except Exception:
+        target_id = None
+
+    member: disnake.Member | None = None
+    if target_id is not None:
+        member = guild.get_member(target_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(target_id)
+            except Exception:
+                member = None
+
+    if member is not None:
+        return member
+
+    for target, overwrite in channel.overwrites.items():
+        if not isinstance(target, disnake.Member):
+            continue
+        if target.id == bot_id:
+            continue
+        # Только пара allow=view_channel — пропускаем `denied` записи.
+        allow, _deny = overwrite.pair()
+        if allow.view_channel:
+            return target
+
+    return None
+
+
+async def _refresh_academy_card_message(
+    channel: disnake.TextChannel,
+    member: disnake.Member,
+    bot_id: int,
+    footer_text: str | None,
+) -> str:
+    """Обновляет/пересоздаёт «карточку» в личном канале кандидата.
+
+    Возвращает строку-результат:
+    * ``"edited"`` — старое сообщение бота отредактировано на новый
+      v2-эмбед;
+    * ``"recreated"`` — старое сообщение бота удалено, отправлено новое
+      v2-сообщение (старые сообщения без V2-флага редактировать нельзя);
+    * ``"sent"`` — в канале не было сообщений бота, отправлено новое;
+    * ``"failed"`` — ничего сделать не удалось.
+    """
+    target_msg: disnake.Message | None = None
+    async for msg in channel.history(limit=50, oldest_first=True):
+        if msg.author.id != bot_id:
+            continue
+        target_msg = msg
+        break
+
+    accepted_at_ts = (
+        int(target_msg.created_at.timestamp())
+        if target_msg is not None
+        else int(datetime.datetime.utcnow().timestamp())
+    )
+    new_cont = _build_academy_card_container(
+        member=member,
+        accepted_at_ts=accepted_at_ts,
+        footer_text=footer_text,
+    )
+
+    if target_msg is None:
+        try:
+            await channel.send(components=new_cont)
+            return "sent"
+        except Exception as ex:
+            print(
+                f"[academy] refresh send {channel.name!r} failed: {ex!r}"
+            )
+            return "failed"
+
+    # Пробуем in-place edit. Это сработает только для V2-сообщений.
+    try:
+        await target_msg.edit(components=new_cont)
+        return "edited"
+    except Exception:
+        pass
+
+    # Не получилось отредактировать (старое сообщение без V2-флага) —
+    # удаляем старое, шлём новое.
+    try:
+        await target_msg.delete()
+    except Exception as ex:
+        print(
+            f"[academy] refresh delete old {channel.name!r} failed: "
+            f"{ex!r}"
+        )
+    try:
+        await channel.send(components=new_cont)
+        return "recreated"
+    except Exception as ex:
+        print(
+            f"[academy] refresh send {channel.name!r} failed: {ex!r}"
+        )
+        return "failed"
+
+
 async def _setup_academy_channel(
     guild: disnake.Guild,
     member: disnake.Member,
@@ -3018,25 +3132,13 @@ class ApplicationsCog(commands.Cog):
 
         deleted: list[str] = []
         updated: list[str] = []
+        recreated: list[str] = []
         skipped: list[str] = []
 
         for ch in list(category.text_channels):
-            topic = (ch.topic or "").strip()
-            target_id: int | None = None
-            try:
-                target_id = int(topic)
-            except Exception:
-                target_id = None
-            if target_id is None:
-                skipped.append(ch.name)
-                continue
-
-            member = inter.guild.get_member(target_id)
-            if member is None:
-                try:
-                    member = await inter.guild.fetch_member(target_id)
-                except Exception:
-                    member = None
+            member = await _resolve_academy_candidate(
+                inter.guild, ch, bot_id
+            )
 
             has_role = False
             if member is not None:
@@ -3045,7 +3147,11 @@ class ApplicationsCog(commands.Cog):
                 if academy_role and academy_role in member.roles:
                     has_role = True
 
-            if member is None or not has_role:
+            if member is None:
+                skipped.append(ch.name)
+                continue
+
+            if not has_role:
                 try:
                     await ch.delete(
                         reason=(
@@ -3061,12 +3167,15 @@ class ApplicationsCog(commands.Cog):
                     )
                 continue
 
+            # Синхронизируем overwrites и topic (в topic кладём user_id
+            # для будущих вызовов).
             try:
                 await ch.edit(
                     overwrites=_build_academy_overwrites(
                         inter.guild, member
                     ),
-                    reason="fix_academy: сброс доступа к каналу",
+                    topic=str(member.id),
+                    reason="fix_academy: сброс доступа/топика",
                 )
             except Exception as ex:
                 print(
@@ -3074,44 +3183,33 @@ class ApplicationsCog(commands.Cog):
                     f"failed: {ex!r}"
                 )
 
+            footer = None
+            if academy_role and academy_role in member.roles:
+                footer = "**Этап:** ACADEMY (2 часть)"
+            elif young_role and young_role in member.roles:
+                footer = "**Этап:** YOUNG (1 часть)"
+
             try:
-                target_msg: disnake.Message | None = None
-                async for msg in ch.history(limit=20, oldest_first=True):
-                    if msg.author.id != bot_id:
-                        continue
-                    if not msg.components:
-                        continue
-                    target_msg = msg
-                    break
-                if target_msg is not None:
-                    accepted_at_ts = int(
-                        target_msg.created_at.timestamp()
-                    )
-                    footer = None
-                    if (
-                        academy_role
-                        and academy_role in member.roles
-                    ):
-                        footer = "**Этап:** ACADEMY (2 часть)"
-                    elif young_role and young_role in member.roles:
-                        footer = "**Этап:** YOUNG (1 часть)"
-                    new_cont = _build_academy_card_container(
-                        member=member,
-                        accepted_at_ts=accepted_at_ts,
-                        footer_text=footer,
-                    )
-                    await target_msg.edit(components=new_cont)
-                    updated.append(ch.name)
+                result = await _refresh_academy_card_message(
+                    ch, member, bot_id, footer
+                )
             except Exception as ex:
                 print(
                     f"[fix_academy] update {ch.name!r} failed: {ex!r}"
                 )
+                result = "failed"
+
+            if result == "edited":
+                updated.append(ch.name)
+            elif result == "recreated":
+                recreated.append(ch.name)
 
         report_lines = [
             f"**Категория:** {category.mention}",
             f"Удалено: **{len(deleted)}**",
             f"Обновлено карточек: **{len(updated)}**",
-            f"Пропущено (нет user_id в topic): **{len(skipped)}**",
+            f"Пересоздано эмбедов: **{len(recreated)}**",
+            f"Пропущено (не нашёл кандидата): **{len(skipped)}**",
         ]
         if deleted:
             report_lines.append(
