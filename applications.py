@@ -31,6 +31,9 @@ ACADEMY_CATEGORY_ID = 1433846608914546818
 YOUNG_ROLE_ID = 1480686843640156371
 ACADEMY_ROLE_ID = 1183863207576739931
 RECRUITMENT_ROLE_ID = 1217923581904687184
+# Роль, выдаваемая после прохождения этапа ACADEMY («Повысить» на
+# финале). Переопределяется через config["ACADEMY"]["RANK_FINAL"].
+FINAL_ROLE_ID = 1183854185586901063
 # Discord жёстко ограничивает категорию 50 каналами.
 DISCORD_CATEGORY_MAX_CHANNELS = 50
 ACADEMY_THREAD_NAMES = ("РП", "Арена", "Общение с рекрутёром")
@@ -2888,17 +2891,62 @@ class ApplicationsCog(commands.Cog):
             )
 
         if has_academy:
-            # Academy → final: модератору select для выбора финальной
-            # роли. Роль ACADEMY снимется по выбору.
-            return await inter.response.send_message(
-                content=(
-                    f"Выберите финальную роль для {member.mention}. "
-                    f"После выбора роль **ACADEMY** будет снята."
-                ),
-                view=FinalRoleSelectView(member, inter.message),
-                ephemeral=True,
-                allowed_mentions=disnake.AllowedMentions.none(),
+            # Academy → final: снять ACADEMY (и оставшийся YOUNG), выдать
+            # финальную роль (FINAL_ROLE_ID / RANK_FINAL) и удалить канал.
+            await inter.response.defer(ephemeral=True)
+            final_role_id = int(
+                config.get("ACADEMY", {}).get(
+                    "RANK_FINAL", FINAL_ROLE_ID
+                )
             )
+            final_role = inter.guild.get_role(final_role_id)
+            if final_role is None:
+                return await inter.followup.send(
+                    f"{e('REJECT')}Финальная роль "
+                    f"`{final_role_id}` не найдена на сервере.",
+                    ephemeral=True,
+                )
+            try:
+                to_remove: list[disnake.Role] = []
+                for r in (young_role, academy_role):
+                    if r is not None and r in member.roles:
+                        to_remove.append(r)
+                if to_remove:
+                    await member.remove_roles(
+                        *to_remove, reason="academy: финал академии"
+                    )
+                await member.add_roles(
+                    final_role, reason="academy: финал академии"
+                )
+            except disnake.Forbidden:
+                return await inter.followup.send(
+                    f"{e('REJECT')}Нет прав на изменение ролей (роль "
+                    f"бота должна быть выше ACADEMY/финальной).",
+                    ephemeral=True,
+                )
+            except Exception as ex:
+                return await inter.followup.send(
+                    f"{e('ERROR')}Ошибка: {ex!r}", ephemeral=True
+                )
+            try:
+                await inter.followup.send(
+                    f"{e('SUCCESS')}Финал: выдана роль {final_role.mention}, "
+                    f"канал `{inter.channel.name}` будет удалён.",
+                    ephemeral=True,
+                    allowed_mentions=disnake.AllowedMentions.none(),
+                )
+            except Exception:
+                pass
+            try:
+                await inter.channel.delete(
+                    reason=(
+                        f"academy: финал {member} пользователем "
+                        f"{inter.author}"
+                    )
+                )
+            except Exception as ex:
+                print(f"[academy] final delete channel failed: {ex!r}")
+            return
 
         return await inter.response.send_message(
             f"{e('WARNING')}У кандидата нет ни роли YOUNG, ни ACADEMY.",
