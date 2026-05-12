@@ -402,7 +402,7 @@ async def _resolve_modal_files(
 
 
 def _build_review_buttons(target_user_id: int) -> disnake.ui.ActionRow:
-    """Кнопки модерации заявки (Принять / Отклонить / Обзвон)."""
+    """Кнопки модерации заявки (Принять / Отклонить / Обзвон / Изменить)."""
     return disnake.ui.ActionRow(
         disnake.ui.Button(
             label="Принять",
@@ -422,7 +422,56 @@ def _build_review_buttons(target_user_id: int) -> disnake.ui.ActionRow:
             style=disnake.ButtonStyle.secondary,
             custom_id=f"call_{target_user_id}",
         ),
+        disnake.ui.Button(
+            label="Изменить",
+            emoji=e_btn("EDIT") or e_btn("SETTINGS"),
+            style=disnake.ButtonStyle.secondary,
+            custom_id=f"edit_{target_user_id}",
+        ),
     )
+
+
+def _parse_application_fields(text: str) -> dict[str, str]:
+    """Обратный парсер текста анкеты в словарь полей.
+
+    Используется для предзаполнения ``EditApplicationModal``. Поддерживает
+    многострочные значения — каждое поле берёт все строки между
+    своим маркером и следующим, без технической строки ``-# Прикреплено…``.
+    """
+    fields: dict[str, str] = {
+        "name_static": "",
+        "age": "",
+        "experience": "",
+        "otkat": "",
+    }
+    if not text:
+        return fields
+
+    markers: list[tuple[str, str]] = [
+        ("name_static", "**Ник и статик:**"),
+        ("age", "**Возраст:**"),
+        ("experience", "**Опыт в семьях:**"),
+        ("otkat", "**Откат:**"),
+    ]
+
+    positions: list[tuple[int, str, str]] = []
+    for key, marker in markers:
+        idx = text.find(marker)
+        if idx >= 0:
+            positions.append((idx, key, marker))
+    positions.sort(key=lambda x: x[0])
+
+    for i, (idx, key, marker) in enumerate(positions):
+        start = idx + len(marker)
+        end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
+        value = text[start:end].strip()
+        # Отрезаем техническую строку «-# Прикреплено скринов: ...»,
+        # если она прилепилась к последнему полю.
+        if "\n-#" in value:
+            value = value.split("\n-#", 1)[0].strip()
+        fields[key] = value
+
+    return fields
 
 
 def _extract_media_urls(msg: disnake.Message) -> list[str]:
@@ -1016,16 +1065,26 @@ class ApplicationModal(disnake.ui.Modal):
             )
         ]
 
-        mentions = " ".join(
-            [f"<@&{r}>" for r in config["ROLES"]["MODERATOR"]]
+        # Строгий пинг одной роли при подаче заявки — по умолчанию
+        # «Рекрутер» (1217923581904687184), можно переопределить
+        # через config["ROLES"]["APPLICATION_PING"].
+        ping_role_id = int(
+            config.get("ROLES", {}).get(
+                "APPLICATION_PING", 1217923581904687184
+            )
         )
         # У v2-сообщений с components нельзя одновременно использовать
-        # content/embed, поэтому пинг ролей идёт отдельным сообщением.
+        # content/embed, поэтому пинг роли идёт отдельным сообщением.
         try:
             await ticket_channel.send(
-                content=f"{mentions}\nНовая заявка от {inter.author.mention}",
+                content=(
+                    f"<@&{ping_role_id}>\nНовая заявка от "
+                    f"{inter.author.mention}"
+                ),
                 allowed_mentions=disnake.AllowedMentions(
-                    roles=True, users=True
+                    roles=[disnake.Object(id=ping_role_id)],
+                    users=True,
+                    everyone=False,
                 ),
             )
         except Exception:
@@ -1044,6 +1103,153 @@ class ApplicationModal(disnake.ui.Modal):
 
         await inter.followup.send(
             f"{e('SUCCESS')}Ваша заявка успешно отправлена: {ticket_channel.mention}",
+            ephemeral=True,
+        )
+
+
+class EditApplicationModal(disnake.ui.Modal):
+    """Модалка «Изменить» для модератора.
+
+    Открывается по клику по кнопке ``edit_<id>`` под уже
+    существующей заявкой. Подставляет текущие значения и на сабмите
+    пересобирает текстовый блок v2-Container'a, сохраняя скрины
+    (URL-ы берутся из текущего эмбеда) и кнопки модерации.
+    """
+
+    def __init__(
+        self,
+        message: disnake.Message,
+        target_user_id: int,
+        current: dict[str, str],
+    ):
+        self.message = message
+        self.target_user_id = target_user_id
+
+        components = [
+            disnake.ui.TextInput(
+                label=_clip_label("Ваш ник и статик"),
+                placeholder="Например: Андрей 1488",
+                custom_id="name_static",
+                style=disnake.TextInputStyle.short,
+                max_length=50,
+                value=(current.get("name_static", "") or "")[:50],
+            ),
+            disnake.ui.TextInput(
+                label=_clip_label("Возраст"),
+                placeholder="Ваш реальный возраст",
+                custom_id="age",
+                style=disnake.TextInputStyle.short,
+                max_length=10,
+                value=(current.get("age", "") or "")[:10],
+            ),
+            disnake.ui.TextInput(
+                label=_clip_label(
+                    "Был ли опыт в семьях? Если был то в каких."
+                ),
+                placeholder="Да, состоял в...",
+                custom_id="experience",
+                style=disnake.TextInputStyle.paragraph,
+                max_length=200,
+                value=(current.get("experience", "") or "")[:200],
+            ),
+            disnake.ui.TextInput(
+                label=_clip_label("Откат (капт, мцл, гг от 5 минут)"),
+                placeholder="Ссылка на видео (YouTube, Drive)",
+                custom_id="otkat",
+                style=disnake.TextInputStyle.paragraph,
+                max_length=300,
+                value=(current.get("otkat", "") or "")[:300],
+            ),
+        ]
+        super().__init__(
+            title="Изменение анкеты", components=components
+        )
+
+    async def callback(self, inter: disnake.ModalInteraction):
+        await inter.response.defer(ephemeral=True)
+
+        # Старый текст анкеты нужен, чтобы вытащить строку «От:» и
+        # бывшее количество скринов; остальные поля берём из inter.
+        app_text = ""
+        try:
+            app_text = _extract_application_text(self.message)
+        except Exception:
+            app_text = ""
+
+        from_line = f"**От:** <@{self.target_user_id}>"
+        for ln in (app_text or "").splitlines():
+            stripped = ln.strip()
+            if stripped.startswith("**От:**"):
+                from_line = stripped
+                break
+
+        screenshot_urls: list[str] = _extract_media_urls(self.message)
+        attached_count = len(screenshot_urls)
+        # Если в старом тексте было явно указано количество —
+        # отдаём ему приоритет (на случай, если _extract_media_urls
+        # не всё нашёл).
+        for ln in (app_text or "").splitlines():
+            stripped = ln.strip()
+            if stripped.startswith("-# Прикреплено скринов:"):
+                import re as _re
+
+                m = _re.search(r"\*\*(\d+)\*\*", stripped)
+                if m:
+                    attached_count = int(m.group(1))
+                break
+
+        desc_lines = [
+            "**Новая заявка**",
+            "",
+            from_line,
+            f"**Ник и статик:** {inter.text_values['name_static']}",
+            f"**Возраст:** {inter.text_values['age']}",
+            f"**Опыт в семьях:** {inter.text_values['experience']}",
+            f"**Откат:** {inter.text_values['otkat']}",
+            f"-# Прикреплено скринов: **{attached_count}**",
+        ]
+
+        children: list = [
+            disnake.ui.TextDisplay("\n".join(desc_lines)),
+            disnake.ui.Separator(
+                divider=True, spacing=disnake.SeparatorSpacing.small
+            ),
+        ]
+        if screenshot_urls:
+            children.append(
+                disnake.ui.MediaGallery(
+                    *[
+                        disnake.MediaGalleryItem(u)
+                        for u in screenshot_urls
+                    ]
+                )
+            )
+            children.append(
+                disnake.ui.Separator(
+                    divider=True, spacing=disnake.SeparatorSpacing.small
+                )
+            )
+        children.append(_build_review_buttons(self.target_user_id))
+
+        cont = [
+            disnake.ui.Container(*children, accent_colour=ORANGE_COLOR)
+        ]
+
+        try:
+            await self.message.edit(components=cont)
+        except Exception as ex:
+            return await inter.followup.send(
+                components=simple_container(
+                    f"{e('ERROR')}Не удалось обновить анкету: {ex!r}",
+                    ERROR_COLOR,
+                ),
+                ephemeral=True,
+            )
+
+        await inter.followup.send(
+            components=simple_container(
+                f"{e('SUCCESS')}Анкета обновлена.", SUCCESS_COLOR
+            ),
             ephemeral=True,
         )
 
@@ -1781,10 +1987,13 @@ class ApplicationsCog(commands.Cog):
                     pass
             return
 
-        if custom_id.startswith(("accept_", "reject_", "call_")):
+        if custom_id.startswith(
+            ("accept_", "reject_", "call_", "edit_")
+        ):
             moderator_roles = config.get("ROLES", {}).get("MODERATOR", [])
+            mod_role_ids_int = {int(x) for x in moderator_roles}
             is_mod = any(
-                r.id in moderator_roles for r in inter.author.roles
+                r.id in mod_role_ids_int for r in inter.author.roles
             )
             if not is_mod and not inter.author.guild_permissions.administrator:
                 return await inter.response.send_message(
@@ -1799,6 +2008,26 @@ class ApplicationsCog(commands.Cog):
         elif custom_id.startswith("reject_"):
             await inter.response.send_modal(
                 RejectModal(custom_id.split("_")[1], str(inter.message.id))
+            )
+
+        elif custom_id.startswith("edit_"):
+            try:
+                target_user_id = int(custom_id.split("_")[1])
+            except (ValueError, IndexError):
+                return await inter.response.send_message(
+                    f"{e('ERROR')}Некорректный ID кандидата в кнопке.",
+                    ephemeral=True,
+                )
+            current_text = ""
+            try:
+                current_text = _extract_application_text(inter.message)
+            except Exception:
+                current_text = ""
+            current = _parse_application_fields(current_text)
+            await inter.response.send_modal(
+                EditApplicationModal(
+                    inter.message, target_user_id, current
+                )
             )
 
         elif custom_id.startswith("call_"):
