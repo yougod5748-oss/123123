@@ -2581,38 +2581,36 @@ class ApplicationsCog(commands.Cog):
             try:
                 msg = await inter.channel.fetch_message(int(message_id))
                 if msg.components:
+                    # «Обзвон» не должен убирать кнопки — оставляем
+                    # все 4 (Принять/Отклонить/Обзвон/Изменить) и только
+                    # добавляем внизу текстовую пометку «Переведено на обзвон».
                     ui_container = _to_ui_container(msg.components[0])
                     new_children: list = []
-                    replaced = False
+                    note_text = (
+                        f"-# Переведено на обзвон: "
+                        f"{inter.author.display_name}"
+                    )
+                    already_marked = False
                     for child in list(
                         getattr(ui_container, "children", []) or []
                     ):
-                        if not replaced and type(child).__name__ == "ActionRow":
-                            new_children.append(
-                                disnake.ui.ActionRow(
-                                    disnake.ui.Button(
-                                        label="Принять",
-                                        emoji=e_btn("SUCCESS"),
-                                        style=disnake.ButtonStyle.success,
-                                        custom_id=f"accept_{user_id}",
-                                    ),
-                                    disnake.ui.Button(
-                                        label="Отклонить",
-                                        emoji=e_btn("REJECT"),
-                                        style=disnake.ButtonStyle.danger,
-                                        custom_id=f"reject_{user_id}",
-                                    ),
-                                )
+                        if (
+                            type(child).__name__ == "TextDisplay"
+                            and getattr(child, "content", "").startswith(
+                                "-# Переведено на обзвон:"
                             )
-                            replaced = True
+                        ):
+                            # Перезаписываем, если рекрутёра поменяли.
+                            new_children.append(
+                                disnake.ui.TextDisplay(note_text)
+                            )
+                            already_marked = True
                         else:
                             new_children.append(child)
-                    new_children.append(
-                        disnake.ui.TextDisplay(
-                            f"-# Переведено на обзвон: "
-                            f"{inter.author.display_name}"
+                    if not already_marked:
+                        new_children.append(
+                            disnake.ui.TextDisplay(note_text)
                         )
-                    )
                     new_cont = [
                         disnake.ui.Container(
                             *new_children, accent_colour=ORANGE_COLOR
@@ -2626,6 +2624,7 @@ class ApplicationsCog(commands.Cog):
                         text=f"Переведено на обзвон: "
                         f"{inter.author.display_name}"
                     )
+                    # Легаси-эмбед: тоже сохраняем все 4 кнопки.
                     view = disnake.ui.View(timeout=None)
                     view.add_item(
                         disnake.ui.Button(
@@ -2641,6 +2640,22 @@ class ApplicationsCog(commands.Cog):
                             emoji=e_btn("REJECT"),
                             style=disnake.ButtonStyle.danger,
                             custom_id=f"reject_{user_id}",
+                        )
+                    )
+                    view.add_item(
+                        disnake.ui.Button(
+                            label="Обзвон",
+                            emoji=e_btn("CALL"),
+                            style=disnake.ButtonStyle.primary,
+                            custom_id=f"call_{user_id}",
+                        )
+                    )
+                    view.add_item(
+                        disnake.ui.Button(
+                            label="Изменить",
+                            emoji=e_btn("EDIT") or e_btn("SETTINGS"),
+                            style=disnake.ButtonStyle.secondary,
+                            custom_id=f"edit_{user_id}",
                         )
                     )
                     await msg.edit(embed=embed, view=view)
