@@ -1345,16 +1345,22 @@ def _get_moderator_role_ids() -> list[int]:
 
 
 def _author_is_academy_moderator(member: disnake.Member | None) -> bool:
-    """Проверяет, что у участника есть хотя бы одна модер-роль."""
+    """Проверяет, что участник имеет право жать кнопки академии.
+
+    Строгий доступ (по требованию):
+    * Discord-право `administrator` — да;
+    * наличие роли `RECRUITMENT_ROLE_ID` — да;
+    * всё остальное (другие модер-роли из config, `manage_channels`
+      и т.п.) — НЕТ.
+    """
     if member is None:
         return False
-    if getattr(member, "guild_permissions", None) and (
-        member.guild_permissions.administrator
-        or member.guild_permissions.manage_channels
+    if (
+        getattr(member, "guild_permissions", None)
+        and member.guild_permissions.administrator
     ):
         return True
-    allowed = set(_get_moderator_role_ids())
-    return any(r.id in allowed for r in member.roles)
+    return any(r.id == RECRUITMENT_ROLE_ID for r in member.roles)
 
 
 def _is_channel_in_category_chain(
