@@ -908,33 +908,38 @@ class ApplicationModal(disnake.ui.Modal):
     def __init__(self):
         components = [
             disnake.ui.TextInput(
-                label="Ник/Статик/Возраст",
-                placeholder="Андрей, 1488, 20 лет",
-                custom_id="name_static_age",
+                label=_clip_label("Ваш ник и статик"),
+                placeholder="Например: Андрей 1488",
+                custom_id="name_static",
                 style=disnake.TextInputStyle.short,
-                max_length=80,
+                max_length=50,
+            ),
+            disnake.ui.TextInput(
+                label=_clip_label("Возраст"),
+                placeholder="Ваш реальный возраст",
+                custom_id="age",
+                style=disnake.TextInputStyle.short,
+                max_length=10,
+            ),
+            disnake.ui.TextInput(
+                label=_clip_label(
+                    "Был ли опыт в семьях? Если был то в каких."
+                ),
+                placeholder="Да, состоял в...",
+                custom_id="experience",
+                style=disnake.TextInputStyle.short,
+                max_length=200,
             ),
             _file_upload_label(
                 f"Скрины персонажей (1–{MAX_APPLICATION_FILES})",
                 required=True,
             ),
             disnake.ui.TextInput(
-                label="Откаты стрельбы гг/mcl/vzz/capt",
-                placeholder="Откат с сайги/тяжки",
-                custom_id="reels",
+                label=_clip_label("Откат (капт, мцл, гг от 5 минут)"),
+                placeholder="Ссылка на видео (YouTube, Drive)",
+                custom_id="otkat",
                 style=disnake.TextInputStyle.paragraph,
-            ),
-            disnake.ui.TextInput(
-                label="В каких семьях Вы состояли, почему покинули?",
-                placeholder="Семья: River, дисбанд",
-                custom_id="history",
-                style=disnake.TextInputStyle.paragraph,
-            ),
-            disnake.ui.TextInput(
-                label="Как давно на проекте и какой средний онлайн?",
-                placeholder="На проекте с 24 года, начинал с Houston...",
-                custom_id="online",
-                style=disnake.TextInputStyle.paragraph,
+                max_length=300,
             ),
         ]
         super().__init__(title="Подать заявку в семью", components=components)
@@ -983,12 +988,11 @@ class ApplicationModal(disnake.ui.Modal):
             "**Новая заявка**",
             "",
             f"**От:** {inter.author.mention}",
-            f"**Ник/Статик/Возраст:** "
-            f"{inter.text_values['name_static_age']}",
-            f"**Откаты стрельбы:** {inter.text_values['reels']}",
-            f"**История семей:** {inter.text_values['history']}",
-            f"**Опыт и онлайн:** {inter.text_values['online']}",
-            f"-# Прикреплено Скрины персонажей (при выборе персонажа): **{len(files)}**",
+            f"**Ник и статик:** {inter.text_values['name_static']}",
+            f"**Возраст:** {inter.text_values['age']}",
+            f"**Опыт в семьях:** {inter.text_values['experience']}",
+            f"**Откат:** {inter.text_values['otkat']}",
+            f"-# Прикреплено скринов: **{len(files)}**",
         ]
 
         children: list = [
@@ -1188,6 +1192,25 @@ class AcceptModal(disnake.ui.Modal):
         except Exception:
             pass
 
+        # Общие данные для всех форвардов: строки из анкеты и URLы скринов.
+        from_line = ""
+        nick_static_line = ""
+        if app_text:
+            for ln in app_text.splitlines():
+                stripped = ln.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("**От:**"):
+                    from_line = stripped
+                elif stripped.startswith("**Ник и статик:**"):
+                    nick_static_line = stripped
+        if not from_line:
+            from_line = f"**От:** <@{self.target_user_id}>"
+
+        screenshot_urls: list[str] = []
+        if app_msg is not None:
+            screenshot_urls = _extract_media_urls(app_msg)
+
         # Объявление о принятии в канал семьи: тихий пинг + первая строка
         # анкеты + скриншоты кандидата из исходной заявки.
         welcome_channel_id = int(
@@ -1205,27 +1228,10 @@ class AcceptModal(disnake.ui.Modal):
                 welcome_channel = None
 
         if welcome_channel:
-            from_line = ""
-            nick_static_age_line = ""
-            if app_text:
-                for ln in app_text.splitlines():
-                    stripped = ln.strip()
-                    if not stripped:
-                        continue
-                    if stripped.startswith("**От:**"):
-                        from_line = stripped
-                    elif stripped.startswith("**Ник/Статик/Возраст:**"):
-                        nick_static_age_line = stripped
-            if not from_line:
-                from_line = f"**От:** <@{self.target_user_id}>"
             welcome_text = from_line
-            if nick_static_age_line:
-                welcome_text += "\n" + nick_static_age_line
+            if nick_static_line:
+                welcome_text += "\n" + nick_static_line
             welcome_text += f"\n**Принял:** {inter.author.mention}"
-
-            screenshot_urls: list[str] = []
-            if app_msg is not None:
-                screenshot_urls = _extract_media_urls(app_msg)
 
             # 1) Тихий пинг отдельным сообщением (silent=True — без push-
             #    уведомления, но @ остаётся как ссылка-меншн).
@@ -1271,6 +1277,68 @@ class AcceptModal(disnake.ui.Modal):
                     )
                 except Exception:
                     pass
+
+        # Отдельный канал для скринов принятых кандидатов (безшумно).
+        # ID можно переопределить в config["CHANNELS"]["SCREENS_CHANNEL"].
+        screens_channel_id = int(
+            config.get("CHANNELS", {}).get(
+                "SCREENS_CHANNEL", 1500077818749653012
+            )
+        )
+        screens_channel = inter.bot.get_channel(screens_channel_id)
+        if not screens_channel:
+            try:
+                screens_channel = await inter.bot.fetch_channel(
+                    screens_channel_id
+                )
+            except Exception:
+                screens_channel = None
+
+        if screens_channel:
+            screens_lines: list[str] = [
+                f"**Кандидат:** <@{self.target_user_id}>"
+            ]
+            if nick_static_line:
+                # Строка уже в формате "**Ник и статик:** ...".
+                screens_lines.append(nick_static_line)
+            screens_lines.append(
+                f"**Принял:** {inter.author.mention}"
+            )
+            screens_text_block = "\n".join(screens_lines)
+
+            screens_children: list = [
+                disnake.ui.TextDisplay(screens_text_block)
+            ]
+            if screenshot_urls:
+                screens_children.append(
+                    disnake.ui.MediaGallery(
+                        *[
+                            disnake.MediaGalleryItem(u)
+                            for u in screenshot_urls
+                        ]
+                    )
+                )
+            screens_cont = [
+                disnake.ui.Container(
+                    *screens_children, accent_colour=SUCCESS_COLOR
+                )
+            ]
+            # Безшумно: пинг кандидата остаётся в тексте (он получает
+            # визуальный mention в чате), но пуша нет (suppress_notifications).
+            try:
+                await screens_channel.send(
+                    components=screens_cont,
+                    allowed_mentions=disnake.AllowedMentions(
+                        users=True, roles=False, everyone=False
+                    ),
+                    flags=disnake.MessageFlags(
+                        suppress_notifications=True
+                    ),
+                )
+            except Exception as ex:
+                print(
+                    f"[applications] send to SCREENS_CHANNEL failed: {ex!r}"
+                )
 
         global_logs_channel_id = int(
             config.get("CHANNELS", {}).get(
