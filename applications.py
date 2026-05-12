@@ -43,7 +43,7 @@ ACADEMY_REFERENCE_IMAGE = (
 )
 
 # Награды модератору в коинах (user_coins.balance).
-ACCEPT_COIN_REWARD = 1
+ACCEPT_COIN_REWARD = 5
 REJECT_COIN_REWARD = 0
 
 # Тексты главного эмбеда в личном канале кандидата (правила).
