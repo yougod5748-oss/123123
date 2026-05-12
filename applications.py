@@ -22,6 +22,58 @@ ORANGE_COLOR = disnake.Colour(0xE67E22)
 # Максимум фото персонажей, которые можно прикрепить к заявке
 MAX_APPLICATION_FILES = 10
 
+# === Academy / Young constants ===
+# Используются как fallback — любой из ID можно переопределить
+# в config["ACADEMY"][...]. Держим дефолты здесь, чтобы не зависеть
+# от наличия секции в config.
+YOUNG_CATEGORY_ID = 1462480155418034301
+ACADEMY_CATEGORY_ID = 1433846608914546818
+YOUNG_ROLE_ID = 1480686843640156371
+ACADEMY_ROLE_ID = 1183863207576739931
+RECRUITMENT_ROLE_ID = 1217923581904687184
+# Discord жёстко ограничивает категорию 50 каналами.
+DISCORD_CATEGORY_MAX_CHANNELS = 50
+ACADEMY_THREAD_NAMES = ("РП", "Арена", "Общение с рекрутёром")
+ACADEMY_REFERENCE_IMAGE = (
+    "https://media.discordapp.net/attachments/1416897708949504051/"
+    "1503645046736420924/image.png?width=1517&height=856"
+)
+
+# Награды модератору в коинах (user_coins.balance).
+ACCEPT_COIN_REWARD = 1
+REJECT_COIN_REWARD = 0
+
+# Тексты главного эмбеда в личном канале кандидата (правила).
+ACADEMY_HEADER_TEXT = (
+    "К отчетам принимаются откаты с МП: ФЗ, Остров, Диллеры, Цеха, "
+    "Дроп, Поставки\n"
+    "Скриншоты с ГГ принимаются только на Ангаре или Подъемнике, "
+    "режим бой насмерть, ган спешик/тяга и сайга, с 16 сервера и выше."
+)
+ACADEMY_YOUNG_RULES = (
+    "**1 часть академии, роль \"YOUNG\"**\n"
+    "срок - 1 неделя\n"
+    "◦ 5 скриншотов с МП с группой (пример ниже) в свою ветку "
+    "**(на фоне общего группа)**\n"
+    "◦ 2 отката где ты активно файтишься на МПшке и слышно колл на фоне\n"
+    "◦ регулярные скрины с ГГ с кд от 1.2\n"
+    "откатали МП - сделали скриншот, сразу скинули (не тяните с "
+    "временем, сразу все скриншоты за неделю не принимаются)\n"
+    "◦ 15 откатов с залазами с карт, которые играют сейчас"
+)
+ACADEMY_ACADEMY_RULES = (
+    "**2 часть академии, роль \"ACADEMY\"**\n"
+    "срок - 2 недели (14 дней)\n"
+    "◦ 10 скриншотов с МП с группой в свою ветку "
+    "**(на фоне общего группа)**\n"
+    "◦ 5 откатов где ты активно файтишься на МПшке и слышно колл на "
+    "фоне\n"
+    "**ОБЯЗАТЕЛЬНЫЙ 1 откат с острова/фз**\n"
+    "◦ регулярные скрины с ГГ с кд от 1.4\n"
+    "откатали МП - сделали скриншот, сразу скинули (не тяните с "
+    "временем, сразу все скриншоты за неделю не принимаются)"
+)
+
 # Persistent custom ids
 APPLICATION_SELECT_CID = "application_action_select"
 APPLICATION_OPTION_CREATE = "create_app"
@@ -1254,6 +1306,415 @@ class EditApplicationModal(disnake.ui.Modal):
         )
 
 
+# ==========================================
+# ACADEMY / YOUNG: helpers and persistent UI
+# ==========================================
+
+def _normalize_channel_name(name: str) -> str:
+    """Нормализует строку под Discord-имя канала.
+
+    Discord сам приводит к нижнему регистру и режет недопустимые символы,
+    но мы делаем это руками, чтобы префикс гарантированно остался.
+    Кириллицу оставляем — Discord сам её сохранит.
+    """
+    import re as _re
+
+    cleaned = _re.sub(r"\s+", "-", (name or "").strip().lower())
+    cleaned = _re.sub(r"[^\w\-\u0400-\u04FF]", "", cleaned)
+    return cleaned[:90] or "user"
+
+
+def _get_moderator_role_ids() -> list[int]:
+    """Возвращает ID-роли модераторов из config (admins + moderators)."""
+    out: list[int] = []
+    roles_cfg = config.get("ROLES", {}) or {}
+    for key in ("ADMIN", "MODERATOR", "MODERATORS", "STAFF"):
+        for rid in roles_cfg.get(key, []) or []:
+            try:
+                out.append(int(rid))
+            except Exception:
+                continue
+    # Роль рекрутёра тоже считаем модерацией для целей academy.
+    out.append(RECRUITMENT_ROLE_ID)
+    return list({rid for rid in out if rid})
+
+
+def _author_is_academy_moderator(member: disnake.Member | None) -> bool:
+    """Проверяет, что у участника есть хотя бы одна модер-роль."""
+    if member is None:
+        return False
+    if getattr(member, "guild_permissions", None) and (
+        member.guild_permissions.administrator
+        or member.guild_permissions.manage_channels
+    ):
+        return True
+    allowed = set(_get_moderator_role_ids())
+    return any(r.id in allowed for r in member.roles)
+
+
+async def _pick_category_with_slots(
+    guild: disnake.Guild,
+    base_category_id: int,
+) -> disnake.CategoryChannel | None:
+    """Возвращает категорию для нового канала; при переполнении создаёт «-N»."""
+    base = guild.get_channel(int(base_category_id))
+    if not isinstance(base, disnake.CategoryChannel):
+        return None
+    if len(base.channels) < DISCORD_CATEGORY_MAX_CHANNELS:
+        return base
+
+    base_name = base.name
+    for n in range(2, 100):
+        candidate_name = f"{base_name}-{n}"
+        candidate = disnake.utils.get(guild.categories, name=candidate_name)
+        if candidate is None:
+            try:
+                return await guild.create_category(
+                    name=candidate_name,
+                    overwrites=base.overwrites,
+                    position=base.position + n - 1,
+                    reason="academy: переполнение базовой категории",
+                )
+            except Exception as ex:
+                print(f"[academy] create_category failed: {ex!r}")
+                return None
+        if len(candidate.channels) < DISCORD_CATEGORY_MAX_CHANNELS:
+            return candidate
+    return None
+
+
+def _build_academy_card_container(
+    member: disnake.Member,
+    accepted_at_ts: int,
+    image_url: str | None = ACADEMY_REFERENCE_IMAGE,
+    show_buttons: bool = True,
+    footer_text: str | None = None,
+) -> list[disnake.ui.Container]:
+    """Собирает v2-Container для личного канала кандидата.
+
+    Включает правила (header + young + academy), личную карточку
+    (ник pong / роли / дата принятия) и кнопки `Повысить`/`Выгнать`.
+    """
+    rules_text = (
+        ACADEMY_HEADER_TEXT
+        + "\n\n"
+        + ACADEMY_YOUNG_RULES
+        + "\n\n"
+        + ACADEMY_ACADEMY_RULES
+    )
+
+    role_mentions = [
+        r.mention
+        for r in sorted(
+            member.roles, key=lambda x: x.position, reverse=True
+        )
+        if r != member.guild.default_role
+    ]
+    if not role_mentions:
+        roles_value = "—"
+    else:
+        # Чтобы не упереться в лимит 4000 на TextDisplay — отдаём максимум
+        # 15 ролей, остальное — счётчик «и ещё N».
+        head = role_mentions[:15]
+        roles_value = ", ".join(head)
+        if len(role_mentions) > 15:
+            roles_value += f", и ещё {len(role_mentions) - 15}"
+
+    card_text = (
+        "**Личная карточка**\n"
+        f"**Ник:** {member.mention}\n"
+        f"**Роли:** {roles_value}\n"
+        f"**Принят:** <t:{accepted_at_ts}:F>"
+    )
+    if footer_text:
+        card_text += f"\n{footer_text}"
+
+    children: list = [disnake.ui.TextDisplay(rules_text)]
+    if image_url:
+        children.append(
+            disnake.ui.Separator(divider=True)
+        )
+        children.append(
+            disnake.ui.MediaGallery(disnake.MediaGalleryItem(image_url))
+        )
+    children.append(disnake.ui.Separator(divider=True))
+    children.append(disnake.ui.TextDisplay(card_text))
+
+    if show_buttons:
+        children.append(disnake.ui.Separator(divider=True))
+        children.append(
+            disnake.ui.ActionRow(
+                disnake.ui.Button(
+                    label="Повысить",
+                    emoji=e_btn("PROMOTE") or e_btn("SUCCESS"),
+                    style=disnake.ButtonStyle.success,
+                    custom_id=f"academy_promote_{member.id}",
+                ),
+                disnake.ui.Button(
+                    label="Выгнать",
+                    emoji=e_btn("REJECT"),
+                    style=disnake.ButtonStyle.danger,
+                    custom_id=f"academy_expel_{member.id}",
+                ),
+            )
+        )
+
+    return [
+        disnake.ui.Container(*children, accent_colour=ORANGE_COLOR)
+    ]
+
+
+async def _setup_academy_channel(
+    guild: disnake.Guild,
+    member: disnake.Member,
+    moderator: disnake.Member | disnake.User,
+    stage: str = "young",
+    accepted_at_ts: int | None = None,
+) -> disnake.TextChannel | None:
+    """Создаёт личный канал кандидата с ветками и эмбедом.
+
+    Канал не виден `@everyone`. Кандидат видит канал и читает историю,
+    но **писать в корень не может** — может только в трёх публичных
+    ветках (`РП` / `Арена` / `Общение с рекрутёром`).
+    Модераторы и роль `RECRUITMENT_ROLE_ID` имеют полный доступ.
+    """
+    base_category_id = (
+        YOUNG_CATEGORY_ID if stage == "young" else ACADEMY_CATEGORY_ID
+    )
+    prefix = "young" if stage == "young" else "академ"
+    category = await _pick_category_with_slots(guild, base_category_id)
+    if category is None:
+        print(
+            f"[academy] no free category for stage={stage}, "
+            f"base_id={base_category_id}"
+        )
+        return None
+
+    base_name = _normalize_channel_name(member.display_name)
+    channel_name = f"{prefix}-{base_name}"[:95]
+
+    overwrites: dict = {
+        guild.default_role: disnake.PermissionOverwrite(
+            view_channel=False,
+            send_messages=False,
+        ),
+        member: disnake.PermissionOverwrite(
+            view_channel=True,
+            read_message_history=True,
+            send_messages=False,  # в корень канала писать нельзя
+            send_messages_in_threads=True,
+            create_public_threads=False,
+            create_private_threads=False,
+            add_reactions=True,
+            attach_files=True,
+            embed_links=True,
+        ),
+    }
+    bot_member = guild.me
+    if bot_member is not None:
+        overwrites[bot_member] = disnake.PermissionOverwrite(
+            view_channel=True,
+            read_message_history=True,
+            send_messages=True,
+            send_messages_in_threads=True,
+            manage_messages=True,
+            manage_threads=True,
+            manage_channels=True,
+        )
+    for r_id in _get_moderator_role_ids():
+        role = guild.get_role(int(r_id))
+        if role is None:
+            continue
+        overwrites[role] = disnake.PermissionOverwrite(
+            view_channel=True,
+            read_message_history=True,
+            send_messages=True,
+            send_messages_in_threads=True,
+            manage_messages=True,
+        )
+
+    try:
+        channel = await guild.create_text_channel(
+            name=channel_name,
+            category=category,
+            topic=str(member.id),
+            overwrites=overwrites,
+            reason=(
+                f"academy {stage}: {member} ({member.id}) "
+                f"by {moderator}"
+            ),
+        )
+    except Exception as ex:
+        print(f"[academy] create_text_channel failed: {ex!r}")
+        return None
+
+    if accepted_at_ts is None:
+        accepted_at_ts = int(datetime.datetime.utcnow().timestamp())
+    try:
+        cont = _build_academy_card_container(
+            member=member, accepted_at_ts=accepted_at_ts
+        )
+        await channel.send(components=cont)
+    except Exception as ex:
+        print(f"[academy] send main embed failed: {ex!r}")
+
+    # Создаём публичные ветки (РП / Арена / Общение с рекрутёром).
+    for thread_name in ACADEMY_THREAD_NAMES:
+        try:
+            await channel.create_thread(
+                name=thread_name,
+                type=disnake.ChannelType.public_thread,
+                auto_archive_duration=10080,  # 7 дней
+                reason="academy: личные ветки кандидата",
+            )
+        except Exception as ex:
+            print(
+                f"[academy] thread '{thread_name}' creation failed: "
+                f"{ex!r}"
+            )
+
+    return channel
+
+
+class FinalRoleSelectView(disnake.ui.View):
+    """Эфемерный select для выдачи финальной роли вместо `ACADEMY`.
+
+    Видит только модератор, который нажал «Повысить» у кандидата с
+    `ACADEMY`. После выбора:
+    - снимается роль `ACADEMY` (и `YOUNG`, если осталась),
+    - выдаётся выбранная роль,
+    - перерисовывается карточка в личном канале кандидата.
+    """
+
+    def __init__(
+        self,
+        member: disnake.Member,
+        message_to_refresh: disnake.Message,
+    ):
+        super().__init__(timeout=10 * 60)
+        self.member = member
+        self.message_to_refresh = message_to_refresh
+
+        # Доступные роли: ниже бота, не managed, не @everyone,
+        # не YOUNG/ACADEMY.
+        bot_member = member.guild.me
+        bot_top = bot_member.top_role.position if bot_member else 0
+        candidates: list[disnake.Role] = []
+        for role in sorted(
+            member.guild.roles, key=lambda r: r.position, reverse=True
+        ):
+            if role.is_default():
+                continue
+            if role.managed:
+                continue
+            if role.id in (YOUNG_ROLE_ID, ACADEMY_ROLE_ID):
+                continue
+            if bot_member is not None and role.position >= bot_top:
+                continue
+            candidates.append(role)
+            if len(candidates) >= 25:
+                break
+
+        options = [
+            disnake.SelectOption(label=r.name[:100], value=str(r.id))
+            for r in candidates
+        ] or [
+            disnake.SelectOption(
+                label="— нет доступных ролей —",
+                value="none",
+                default=True,
+            )
+        ]
+        select = disnake.ui.Select(
+            placeholder="Выберите финальную роль для кандидата",
+            options=options,
+            min_values=1,
+            max_values=1,
+            custom_id="academy_final_role_select",
+        )
+        select.callback = self.on_select  # type: ignore[assignment]
+        self.add_item(select)
+
+    async def on_select(self, inter: disnake.MessageInteraction):
+        if not _author_is_academy_moderator(
+            inter.author if isinstance(inter.author, disnake.Member) else None
+        ):
+            return await inter.response.send_message(
+                f"{e('REJECT')}Только модераторы могут выдавать роли.",
+                ephemeral=True,
+            )
+        values = list(getattr(inter, "values", None) or [])
+        if not values or values[0] == "none":
+            return await inter.response.send_message(
+                f"{e('REJECT')}Выберите роль.", ephemeral=True
+            )
+        try:
+            role_id = int(values[0])
+        except Exception:
+            return await inter.response.send_message(
+                f"{e('ERROR')}Некорректное значение.", ephemeral=True
+            )
+        role = inter.guild.get_role(role_id) if inter.guild else None
+        if not role:
+            return await inter.response.send_message(
+                f"{e('ERROR')}Роль не найдена.", ephemeral=True
+            )
+
+        # Снимаем YOUNG/ACADEMY и выдаём выбранную роль.
+        try:
+            to_remove: list[disnake.Role] = []
+            for rid in (YOUNG_ROLE_ID, ACADEMY_ROLE_ID):
+                r = inter.guild.get_role(rid)
+                if r and r in self.member.roles:
+                    to_remove.append(r)
+            if to_remove:
+                await self.member.remove_roles(
+                    *to_remove, reason="Финал академии"
+                )
+            await self.member.add_roles(role, reason="Финал академии")
+        except disnake.Forbidden:
+            return await inter.response.send_message(
+                f"{e('REJECT')}Нет прав на изменение ролей.",
+                ephemeral=True,
+            )
+        except Exception as ex:
+            return await inter.response.send_message(
+                f"{e('ERROR')}Ошибка: {ex!r}", ephemeral=True
+            )
+
+        try:
+            new_cont = _build_academy_card_container(
+                member=self.member,
+                accepted_at_ts=int(
+                    datetime.datetime.utcnow().timestamp()
+                ),
+                show_buttons=False,
+                footer_text=(
+                    f"**Этап:** Завершён — выдана роль {role.mention}"
+                ),
+            )
+            await self.message_to_refresh.edit(components=new_cont)
+        except Exception:
+            pass
+
+        for child in self.children:
+            if hasattr(child, "disabled"):
+                child.disabled = True
+        try:
+            await inter.response.edit_message(
+                content=f"{e('SUCCESS')}Выдана финальная роль {role.mention}.",
+                view=self,
+            )
+        except disnake.HTTPException:
+            try:
+                await inter.followup.send(
+                    f"{e('SUCCESS')}Выдана финальная роль {role.mention}.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+
+
 class AcceptModal(disnake.ui.Modal):
     def __init__(self, target_user_id: str, message_id: str):
         self.target_user_id = target_user_id
@@ -1308,13 +1769,17 @@ class AcceptModal(disnake.ui.Modal):
                     if role and role not in roles_to_add:
                         roles_to_add.append(role)
 
-                academy_role_id = config.get("ACADEMY", {}).get(
-                    "RANK_ACADEMY"
+                # На приём — выдаём роль YOUNG (1 часть академии).
+                # Роль ACADEMY (2 часть) выдаётся только по кнопке
+                # «Повысить» в личном канале кандидата.
+                young_role_id = int(
+                    config.get("ACADEMY", {}).get(
+                        "RANK_YOUNG", YOUNG_ROLE_ID
+                    )
                 )
-                if academy_role_id:
-                    acad_role = inter.guild.get_role(int(academy_role_id))
-                    if acad_role and acad_role not in roles_to_add:
-                        roles_to_add.append(acad_role)
+                young_role = inter.guild.get_role(young_role_id)
+                if young_role and young_role not in roles_to_add:
+                    roles_to_add.append(young_role)
 
                 if roles_to_add:
                     await member.add_roles(*roles_to_add)
@@ -1366,12 +1831,18 @@ class AcceptModal(disnake.ui.Modal):
 
             if not is_farm:
                 await db.execute(
-                    "INSERT INTO user_coins (user_id, balance) VALUES (?, 5) "
-                    "ON CONFLICT(user_id) DO UPDATE SET balance = balance + 5",
-                    (str(inter.author.id),),
+                    "INSERT INTO user_coins (user_id, balance) VALUES (?, ?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET "
+                    "balance = balance + ?",
+                    (
+                        str(inter.author.id),
+                        ACCEPT_COIN_REWARD,
+                        ACCEPT_COIN_REWARD,
+                    ),
                 )
                 await db.execute(
-                    "INSERT INTO rewarded_candidates (candidate_id) VALUES (?)",
+                    "INSERT INTO rewarded_candidates (candidate_id) "
+                    "VALUES (?)",
                     (str(self.target_user_id),),
                 )
 
@@ -1575,7 +2046,7 @@ class AcceptModal(disnake.ui.Modal):
                 name="Проверил", value=inter.author.mention, inline=True
             )
 
-            reward_amount = 0 if is_farm else 10
+            reward_amount = 0 if is_farm else ACCEPT_COIN_REWARD
             global_embed.add_field(
                 name="Награда модератора",
                 value=f"`{reward_amount} TC`",
@@ -1611,6 +2082,29 @@ class AcceptModal(disnake.ui.Modal):
                 )
 
             await global_channel.send(embed=global_embed)
+
+        # === Личный канал YOUNG для принятого кандидата ===
+        # Создаём в категории 1462480155418034301 (или соседней «-N»,
+        # если базовая забита). В канале висит главный эмбед +
+        # карточка кандидата + кнопки `Повысить`/`Выгнать`, а также
+        # три публичные ветки: РП / Арена / Общение с рекрутёром.
+        if member is not None and inter.guild is not None:
+            try:
+                accepted_at_ts = int(
+                    datetime.datetime.utcnow().timestamp()
+                )
+                await _setup_academy_channel(
+                    guild=inter.guild,
+                    member=member,
+                    moderator=inter.author,
+                    stage="young",
+                    accepted_at_ts=accepted_at_ts,
+                )
+            except Exception as ex:
+                print(
+                    f"[academy] _setup_academy_channel(young) failed: "
+                    f"{ex!r}"
+                )
 
         await inter.channel.delete(reason="Заявка принята")
 
@@ -1669,16 +2163,11 @@ class RejectModal(disnake.ui.Modal):
                 if await cursor.fetchone():
                     is_farm = True
 
-            if not is_farm:
-                await db.execute(
-                    "INSERT INTO user_coins (user_id, balance) VALUES (?, 3) "
-                    "ON CONFLICT(user_id) DO UPDATE SET balance = balance + 3",
-                    (str(inter.author.id),),
-                )
-                await db.execute(
-                    "INSERT INTO rewarded_candidates (candidate_id) VALUES (?)",
-                    (str(self.target_user_id),),
-                )
+            # Отклонение — никаких коинов (REJECT_COIN_REWARD = 0).
+            # `rewarded_candidates` тоже не трогаем, чтобы при повторной
+            # заявке и принятии модератор всё же получил положенный
+            # +1. Оставляем is_farm = False, чтобы эмбед ниже не сломался.
+            _ = is_farm  # пользуем в глобальном логе ниже
 
             await db.execute(
                 "UPDATE applications SET status = ? WHERE message_id = ?",
@@ -1768,7 +2257,7 @@ class RejectModal(disnake.ui.Modal):
                 name="Причина", value=f"{formatted_reason}", inline=True
             )
 
-            reward_amount = 0 if is_farm else 3
+            reward_amount = REJECT_COIN_REWARD
             global_embed.add_field(
                 name="Награда модератора",
                 value=f"`{reward_amount} TC`",
@@ -1985,6 +2474,12 @@ class ApplicationsCog(commands.Cog):
                     await inter.message.edit(components=cont)
                 except Exception:
                     pass
+            return
+
+        if custom_id.startswith(
+            ("academy_promote_", "academy_expel_")
+        ):
+            await self._handle_academy_button(inter, custom_id)
             return
 
         if custom_id.startswith(
@@ -2233,6 +2728,310 @@ class ApplicationsCog(commands.Cog):
             await inter.followup.send(
                 f"{e('SUCCESS')}Кандидат вызван.", ephemeral=True
             )
+
+    # ==========================================
+    # ACADEMY: обработчики кнопок + /fix_academy
+    # ==========================================
+
+    async def _handle_academy_button(
+        self,
+        inter: disnake.MessageInteraction,
+        custom_id: str,
+    ) -> None:
+        """Обработчик `academy_promote_<id>` и `academy_expel_<id>`.
+
+        Доступ только модераторам (роли из _get_moderator_role_ids
+        или administrator/manage_channels).
+        """
+        author = inter.author if isinstance(
+            inter.author, disnake.Member
+        ) else None
+        if not _author_is_academy_moderator(author):
+            return await inter.response.send_message(
+                f"{e('REJECT')}Кнопки доступны только модераторам.",
+                ephemeral=True,
+            )
+        if inter.guild is None:
+            return
+
+        try:
+            target_user_id = int(custom_id.rsplit("_", 1)[-1])
+        except (ValueError, IndexError):
+            return await inter.response.send_message(
+                f"{e('ERROR')}Некорректный ID.", ephemeral=True
+            )
+        member = inter.guild.get_member(target_user_id)
+        if member is None:
+            try:
+                member = await inter.guild.fetch_member(target_user_id)
+            except Exception:
+                member = None
+
+        young_role = inter.guild.get_role(YOUNG_ROLE_ID)
+        academy_role = inter.guild.get_role(ACADEMY_ROLE_ID)
+
+        if custom_id.startswith("academy_expel_"):
+            await inter.response.defer(ephemeral=True)
+            if member is not None:
+                to_remove: list[disnake.Role] = []
+                for r in (young_role, academy_role):
+                    if r is not None and r in member.roles:
+                        to_remove.append(r)
+                if to_remove:
+                    try:
+                        await member.remove_roles(
+                            *to_remove, reason="academy: выгнан"
+                        )
+                    except Exception as ex:
+                        print(
+                            f"[academy] expel remove_roles failed: "
+                            f"{ex!r}"
+                        )
+            try:
+                await inter.followup.send(
+                    f"{e('SUCCESS')}Кандидат выгнан, канал будет удалён.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+            try:
+                await inter.channel.delete(
+                    reason=f"academy: выгнан {member} пользователем "
+                    f"{inter.author}"
+                )
+            except Exception as ex:
+                print(f"[academy] expel delete channel failed: {ex!r}")
+            return
+
+        # academy_promote_<id>
+        if member is None:
+            return await inter.response.send_message(
+                f"{e('REJECT')}Пользователь не найден на сервере.",
+                ephemeral=True,
+            )
+
+        has_young = young_role in member.roles if young_role else False
+        has_academy = (
+            academy_role in member.roles if academy_role else False
+        )
+
+        if has_young and not has_academy:
+            # Young → Academy: перенести канал + смена ролей.
+            await inter.response.defer(ephemeral=True)
+            new_category = await _pick_category_with_slots(
+                inter.guild, ACADEMY_CATEGORY_ID
+            )
+            if new_category is None:
+                return await inter.followup.send(
+                    f"{e('REJECT')}Не получилось получить категорию академии.",
+                    ephemeral=True,
+                )
+            new_name = (
+                f"академ-"
+                f"{_normalize_channel_name(member.display_name)}"
+            )[:95]
+            try:
+                await inter.channel.edit(
+                    category=new_category,
+                    name=new_name,
+                    reason=f"academy: повышение {member} до ACADEMY",
+                )
+            except Exception as ex:
+                print(f"[academy] promote edit channel failed: {ex!r}")
+            try:
+                if young_role:
+                    await member.remove_roles(
+                        young_role, reason="academy: повышение"
+                    )
+                if academy_role:
+                    await member.add_roles(
+                        academy_role, reason="academy: повышение"
+                    )
+            except disnake.Forbidden:
+                return await inter.followup.send(
+                    f"{e('REJECT')}Нет прав на изменение ролей.",
+                    ephemeral=True,
+                )
+            except Exception as ex:
+                return await inter.followup.send(
+                    f"{e('ERROR')}Ошибка: {ex!r}", ephemeral=True
+                )
+            try:
+                new_cont = _build_academy_card_container(
+                    member=member,
+                    accepted_at_ts=int(
+                        datetime.datetime.utcnow().timestamp()
+                    ),
+                    footer_text="**Этап:** ACADEMY (2 часть)",
+                )
+                await inter.message.edit(components=new_cont)
+            except Exception as ex:
+                print(f"[academy] promote refresh card failed: {ex!r}")
+            return await inter.followup.send(
+                f"{e('SUCCESS')}Кандидат повышен до ACADEMY.",
+                ephemeral=True,
+            )
+
+        if has_academy:
+            # Academy → final: модератору select для выбора финальной
+            # роли. Роль ACADEMY снимется по выбору.
+            return await inter.response.send_message(
+                content=(
+                    f"Выберите финальную роль для {member.mention}. "
+                    f"После выбора роль **ACADEMY** будет снята."
+                ),
+                view=FinalRoleSelectView(member, inter.message),
+                ephemeral=True,
+                allowed_mentions=disnake.AllowedMentions.none(),
+            )
+
+        return await inter.response.send_message(
+            f"{e('WARNING')}У кандидата нет ни роли YOUNG, ни ACADEMY.",
+            ephemeral=True,
+        )
+
+    @commands.slash_command(
+        name="fix_academy",
+        description="Корректировка каналов академии по категории",
+    )
+    async def fix_academy(
+        self,
+        inter: disnake.GuildCommandInteraction,
+        category: disnake.CategoryChannel = commands.Param(
+            description="Категория для корректировки"
+        ),
+    ) -> None:
+        """Корректировка личных каналов академии по категории.
+
+        - Обходит все текстовые каналы в категории.
+        - Для каждого канала берёт user_id из топика (бот кладёт его
+          при создании).
+        - Если пользователя нет на сервере или у него нет роли YOUNG/
+          ACADEMY — канал удаляется.
+        - Иначе обновляет первое ботовое сообщение в канале (карточку).
+
+        Доступ: только роль RECRUITMENT_ROLE_ID (или administrator).
+        """
+        author = inter.author if isinstance(
+            inter.author, disnake.Member
+        ) else None
+        if author is None:
+            return
+        is_recruit = any(
+            r.id == RECRUITMENT_ROLE_ID for r in author.roles
+        )
+        if not is_recruit and not author.guild_permissions.administrator:
+            return await inter.response.send_message(
+                f"{e('REJECT')}Команда доступна только роли "
+                f"<@&{RECRUITMENT_ROLE_ID}>.",
+                ephemeral=True,
+            )
+
+        await inter.response.defer(ephemeral=True)
+
+        young_role = inter.guild.get_role(YOUNG_ROLE_ID)
+        academy_role = inter.guild.get_role(ACADEMY_ROLE_ID)
+        bot_id = inter.bot.user.id if inter.bot.user else 0
+
+        deleted: list[str] = []
+        updated: list[str] = []
+        skipped: list[str] = []
+
+        for ch in list(category.text_channels):
+            topic = (ch.topic or "").strip()
+            target_id: int | None = None
+            try:
+                target_id = int(topic)
+            except Exception:
+                target_id = None
+            if target_id is None:
+                skipped.append(ch.name)
+                continue
+
+            member = inter.guild.get_member(target_id)
+            if member is None:
+                try:
+                    member = await inter.guild.fetch_member(target_id)
+                except Exception:
+                    member = None
+
+            has_role = False
+            if member is not None:
+                if young_role and young_role in member.roles:
+                    has_role = True
+                if academy_role and academy_role in member.roles:
+                    has_role = True
+
+            if member is None or not has_role:
+                try:
+                    await ch.delete(
+                        reason=(
+                            "fix_academy: нет роли YOUNG/ACADEMY или вне "
+                            "сервера"
+                        )
+                    )
+                    deleted.append(ch.name)
+                except Exception as ex:
+                    print(
+                        f"[fix_academy] delete {ch.name!r} failed: "
+                        f"{ex!r}"
+                    )
+                continue
+
+            try:
+                target_msg: disnake.Message | None = None
+                async for msg in ch.history(limit=20, oldest_first=True):
+                    if msg.author.id != bot_id:
+                        continue
+                    if not msg.components:
+                        continue
+                    target_msg = msg
+                    break
+                if target_msg is not None:
+                    accepted_at_ts = int(
+                        target_msg.created_at.timestamp()
+                    )
+                    footer = None
+                    if (
+                        academy_role
+                        and academy_role in member.roles
+                    ):
+                        footer = "**Этап:** ACADEMY (2 часть)"
+                    elif young_role and young_role in member.roles:
+                        footer = "**Этап:** YOUNG (1 часть)"
+                    new_cont = _build_academy_card_container(
+                        member=member,
+                        accepted_at_ts=accepted_at_ts,
+                        footer_text=footer,
+                    )
+                    await target_msg.edit(components=new_cont)
+                    updated.append(ch.name)
+            except Exception as ex:
+                print(
+                    f"[fix_academy] update {ch.name!r} failed: {ex!r}"
+                )
+
+        report_lines = [
+            f"**Категория:** {category.mention}",
+            f"Удалено: **{len(deleted)}**",
+            f"Обновлено карточек: **{len(updated)}**",
+            f"Пропущено (нет user_id в topic): **{len(skipped)}**",
+        ]
+        if deleted:
+            report_lines.append(
+                f"_Deleted:_ {', '.join(deleted[:15])}"
+                + (
+                    f" и ещё {len(deleted) - 15}..."
+                    if len(deleted) > 15
+                    else ""
+                )
+            )
+        await inter.followup.send(
+            components=simple_container(
+                "\n".join(report_lines), SUCCESS_COLOR
+            ),
+            ephemeral=True,
+        )
 
     @commands.command(name="setup")
     @commands.has_permissions(administrator=True)
