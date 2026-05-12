@@ -1467,35 +1467,20 @@ def _build_academy_card_container(
     ]
 
 
-async def _setup_academy_channel(
-    guild: disnake.Guild,
-    member: disnake.Member,
-    moderator: disnake.Member | disnake.User,
-    stage: str = "young",
-    accepted_at_ts: int | None = None,
-) -> disnake.TextChannel | None:
-    """Создаёт личный канал кандидата с ветками и эмбедом.
+def _build_academy_overwrites(
+    guild: disnake.Guild, member: disnake.Member
+) -> dict:
+    """Строгие overwrites для канала академии.
 
-    Канал не виден `@everyone`. Кандидат видит канал и читает историю,
-    но **писать в корень не может** — может только в трёх публичных
-    ветках (`РП` / `Арена` / `Общение с рекрутёром`).
-    Модераторы и роль `RECRUITMENT_ROLE_ID` имеют полный доступ.
+    Доступ разрешён только:
+    * кандидату (видит/читает; пишет только в ветках);
+    * роли `RECRUITMENT_ROLE_ID` (полный доступ);
+    * боту (обслуживание канала и веток).
+
+    Остальные модераторские роли из config больше НЕ добавляются в
+    overwrites — по требованию (строгий доступ). Админы всё равно
+    видят канал через право `administrator` в Discord.
     """
-    base_category_id = (
-        YOUNG_CATEGORY_ID if stage == "young" else ACADEMY_CATEGORY_ID
-    )
-    prefix = "young" if stage == "young" else "академ"
-    category = await _pick_category_with_slots(guild, base_category_id)
-    if category is None:
-        print(
-            f"[academy] no free category for stage={stage}, "
-            f"base_id={base_category_id}"
-        )
-        return None
-
-    base_name = _normalize_channel_name(member.display_name)
-    channel_name = f"{prefix}-{base_name}"[:95]
-
     overwrites: dict = {
         guild.default_role: disnake.PermissionOverwrite(
             view_channel=False,
@@ -1524,17 +1509,49 @@ async def _setup_academy_channel(
             manage_threads=True,
             manage_channels=True,
         )
-    for r_id in _get_moderator_role_ids():
-        role = guild.get_role(int(r_id))
-        if role is None:
-            continue
-        overwrites[role] = disnake.PermissionOverwrite(
+    recruit_role = guild.get_role(RECRUITMENT_ROLE_ID)
+    if recruit_role is not None:
+        overwrites[recruit_role] = disnake.PermissionOverwrite(
             view_channel=True,
             read_message_history=True,
             send_messages=True,
             send_messages_in_threads=True,
             manage_messages=True,
+            manage_threads=True,
         )
+    return overwrites
+
+
+async def _setup_academy_channel(
+    guild: disnake.Guild,
+    member: disnake.Member,
+    moderator: disnake.Member | disnake.User,
+    stage: str = "young",
+    accepted_at_ts: int | None = None,
+) -> disnake.TextChannel | None:
+    """Создаёт личный канал кандидата с ветками и эмбедом.
+
+    Канал не виден `@everyone`. Кандидат видит канал и читает историю,
+    но **писать в корень не может** — может только в трёх публичных
+    ветках (`РП` / `Арена` / `Общение с рекрутёром`).
+    Доступ имеют только кандидат и роль `RECRUITMENT_ROLE_ID`.
+    """
+    base_category_id = (
+        YOUNG_CATEGORY_ID if stage == "young" else ACADEMY_CATEGORY_ID
+    )
+    prefix = "young" if stage == "young" else "академ"
+    category = await _pick_category_with_slots(guild, base_category_id)
+    if category is None:
+        print(
+            f"[academy] no free category for stage={stage}, "
+            f"base_id={base_category_id}"
+        )
+        return None
+
+    base_name = _normalize_channel_name(member.display_name)
+    channel_name = f"{prefix}-{base_name}"[:95]
+
+    overwrites = _build_academy_overwrites(guild, member)
 
     try:
         channel = await guild.create_text_channel(
@@ -2852,6 +2869,9 @@ class ApplicationsCog(commands.Cog):
                 await inter.channel.edit(
                     category=new_category,
                     name=new_name,
+                    overwrites=_build_academy_overwrites(
+                        inter.guild, member
+                    ),
                     reason=f"academy: повышение {member} до ACADEMY",
                 )
             except Exception as ex:
@@ -3040,6 +3060,19 @@ class ApplicationsCog(commands.Cog):
                         f"{ex!r}"
                     )
                 continue
+
+            try:
+                await ch.edit(
+                    overwrites=_build_academy_overwrites(
+                        inter.guild, member
+                    ),
+                    reason="fix_academy: сброс доступа к каналу",
+                )
+            except Exception as ex:
+                print(
+                    f"[fix_academy] reset overwrites {ch.name!r} "
+                    f"failed: {ex!r}"
+                )
 
             try:
                 target_msg: disnake.Message | None = None
