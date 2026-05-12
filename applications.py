@@ -1572,22 +1572,37 @@ async def _refresh_academy_card_message(
     bot_id: int,
     footer_text: str | None,
 ) -> str:
-    """Обновляет/пересоздаёт «карточку» в личном канале кандидата.
+    """Обновляет «карточку» в личном канале кандидата.
 
-    Возвращает строку-результат:
-    * ``"edited"`` — старое сообщение бота отредактировано на новый
-      v2-эмбед;
-    * ``"recreated"`` — старое сообщение бота удалено, отправлено новое
-      v2-сообщение (старые сообщения без V2-флага редактировать нельзя);
-    * ``"sent"`` — в канале не было сообщений бота, отправлено новое;
-    * ``"failed"`` — ничего сделать не удалось.
+    Логика:
+    1. Собираем все ботовские сообщения в канале.
+    2. Ищем среди них верхнее V2-сообщение (с components) — нашу
+       живую карточку. Если нашли и редактирование проходит — это путь
+       ``"edited"``. Все остальные ботовские сообщения чистим.
+    3. Если подходящего V2-сообщения нет или ``edit`` падает
+       (старое сообщение без V2-флага), удаляем ВСЕ ботовские
+       сообщения (включая системные ``thread_created``) и шлём новый
+       эмбед верхом — это путь ``"recreated"`` (или ``"sent"`` в
+       пустом канале).
+
+    ВАЖНО: ветки (`disnake.Thread`) не удаляются. Удаление системного
+    сообщения «thread_created» от Discord НЕ удаляет саму ветку — ветки
+    это отдельные сущности со своими ID, они выживают чистку.
     """
-    target_msg: disnake.Message | None = None
-    async for msg in channel.history(limit=50, oldest_first=True):
+    bot_msgs: list[disnake.Message] = []
+    async for msg in channel.history(limit=100, oldest_first=True):
         if msg.author.id != bot_id:
             continue
-        target_msg = msg
-        break
+        bot_msgs.append(msg)
+
+    # Пытаемся найти живую карточку (бот + V2 + components).
+    target_msg: disnake.Message | None = None
+    for m in bot_msgs:
+        if m.type != disnake.MessageType.default:
+            continue
+        if m.components:
+            target_msg = m
+            break
 
     accepted_at_ts = (
         int(target_msg.created_at.timestamp())
@@ -1600,35 +1615,45 @@ async def _refresh_academy_card_message(
         footer_text=footer_text,
     )
 
-    if target_msg is None:
+    edited_in_place = False
+    if target_msg is not None:
         try:
-            await channel.send(components=new_cont)
-            return "sent"
+            await target_msg.edit(components=new_cont)
+            edited_in_place = True
+        except Exception:
+            edited_in_place = False
+
+    if edited_in_place:
+        # Карточка обновлена на своём месте — убираем все прочие
+        # ботовские сообщения (старый плавающий текст правил),
+        # включая системные thread_created. Ветки остаются.
+        for m in bot_msgs:
+            if m.id == target_msg.id:
+                continue
+            try:
+                await m.delete()
+            except Exception as ex:
+                print(
+                    f"[academy] cleanup delete {channel.name!r} "
+                    f"failed: {ex!r}"
+                )
+        return "edited"
+
+    # Редактировать не получилось или V2-сообщения не было:
+    # чистим всё ботовское и шлём эмбед «с нуля» — он станет
+    # единственным ботовским сообщением в канале и визуально ±вверху.
+    had_msgs = bool(bot_msgs)
+    for m in bot_msgs:
+        try:
+            await m.delete()
         except Exception as ex:
             print(
-                f"[academy] refresh send {channel.name!r} failed: {ex!r}"
+                f"[academy] cleanup delete {channel.name!r} "
+                f"failed: {ex!r}"
             )
-            return "failed"
-
-    # Пробуем in-place edit. Это сработает только для V2-сообщений.
-    try:
-        await target_msg.edit(components=new_cont)
-        return "edited"
-    except Exception:
-        pass
-
-    # Не получилось отредактировать (старое сообщение без V2-флага) —
-    # удаляем старое, шлём новое.
-    try:
-        await target_msg.delete()
-    except Exception as ex:
-        print(
-            f"[academy] refresh delete old {channel.name!r} failed: "
-            f"{ex!r}"
-        )
     try:
         await channel.send(components=new_cont)
-        return "recreated"
+        return "recreated" if had_msgs else "sent"
     except Exception as ex:
         print(
             f"[academy] refresh send {channel.name!r} failed: {ex!r}"
