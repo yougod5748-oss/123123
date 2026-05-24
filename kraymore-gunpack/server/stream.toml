@@ -1,0 +1,47 @@
+# stream.toml — companion manifest consumed by build/CI tooling.
+#
+# alt:V itself does NOT require this file; the runtime streaming list
+# is derived from `client-files` in resource.toml. We keep stream.toml
+# as a single source of truth that both `build_rpf.py` and the alt:V
+# resource manifest can refer to, so updates do not drift between the
+# two.
+
+[archive]
+name = "dlc.rpf"
+output = "../dist/dlc.rpf"
+
+# Weapons that the pack overrides. Each entry must have matching
+# `<stem>.yft` and `<stem>.ytd` files inside the build directory.
+# Keeping the list here lets build_rpf.py --strict verify the bundle
+# without rescanning the entire RAGE catalogue.
+[[weapons]]
+stem  = "w_pi_heavypistol"
+class = "WEAPON_HEAVYPISTOL"
+group = "GROUP_PISTOL"
+
+[[weapons]]
+stem  = "w_ar_assaultrifle"
+class = "WEAPON_ASSAULTRIFLE"
+group = "GROUP_RIFLE"
+
+[[weapons]]
+stem  = "w_ar_carbinerifle"
+class = "WEAPON_CARBINERIFLE"
+group = "GROUP_RIFLE"
+
+[[weapons]]
+stem  = "w_sb_microsmg"
+class = "WEAPON_MICROSMG"
+group = "GROUP_SMG"
+
+[[weapons]]
+stem  = "w_sr_marksmanrifle"
+class = "WEAPON_MARKSMANRIFLE"
+group = "GROUP_SNIPER"
+
+# VFX overrides (optional). Particle dictionaries live in their own
+# .ypt file and are picked up automatically by the streamer when
+# present in the source directory.
+[vfx]
+tracers       = "weaponfx_kraymore.ypt"
+muzzle_flash  = "weaponfx_kraymore.ypt"

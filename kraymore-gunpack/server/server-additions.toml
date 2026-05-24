@@ -1,0 +1,15 @@
+# Append these lines to your existing `server.toml` to load the
+# Kraymore gunpack. Do NOT replace your server.toml wholesale — alt:V
+# servers are highly individual and replacing the file will drop
+# unrelated settings (gamemode resources, voice config, etc.).
+
+# Append `kraymore-gunpack` to the existing resources array, e.g.:
+#
+#   resources = [
+#     "your-existing-resource",
+#     "another-resource",
+#     "kraymore-gunpack",     # <-- add this line
+#   ]
+#
+# Order matters only if another resource depends on this one; the
+# gunpack itself has no deps and can sit anywhere in the array.

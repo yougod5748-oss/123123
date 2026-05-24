@@ -1,0 +1,27 @@
+# Editor sources & RAGE binaries — never commit Rockstar IP.
+build/
+dist/
+*.rpf
+*.yft
+*.ydr
+*.ytd
+*.ypt
+*.dds
+*.psd
+*.png
+!textures/templates/kraymore_logo.svg
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/

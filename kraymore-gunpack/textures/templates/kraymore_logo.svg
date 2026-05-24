@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Master "kraymore!" wordmark.
+
+    Designed at 4096×1024 so that downscaling to 1024 and 512 keeps
+    the lettering sharp. Stroke widths are expressed in viewBox units
+    (not px) so the file is resolution-independent.
+
+    Render this to PNG at the resolution you need, drop it onto the
+    emissive layer in your texture editor, and place the result in
+    the weapon's .ytd as `kraymore_emissive`.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4096 1024" width="4096" height="1024">
+    <defs>
+        <linearGradient id="neon" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"  stop-color="#FF1FB8" />
+            <stop offset="50%" stop-color="#FF66E0" />
+            <stop offset="100%" stop-color="#FF1FB8" />
+        </linearGradient>
+    </defs>
+    <rect width="4096" height="1024" fill="#000000" />
+    <text
+        x="50%" y="55%"
+        font-family="Inter, 'SF Pro Display', system-ui, sans-serif"
+        font-weight="900"
+        font-size="640"
+        fill="url(#neon)"
+        text-anchor="middle"
+        dominant-baseline="middle"
+        letter-spacing="-10"
+    >kraymore!</text>
+</svg>
