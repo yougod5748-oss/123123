@@ -1,0 +1,31 @@
+# Alt:V resource manifest for the Kraymore Gunpack.
+#
+# Place this file at the root of your resource directory, e.g.
+#   server/resources/kraymore-gunpack/resource.toml
+#
+# alt:V supports a dedicated `dlc` resource type that streams a
+# packaged `dlc.rpf` to every connected client without requiring any
+# server-side logic. We use that here — no JS, no C#, just assets.
+#
+# Reference: https://docs.altv.mp/articles/cdn_resources.html
+#            https://docs.altv.mp/articles/resource_manifest.html
+
+type = "dlc"
+
+# `main` is the bundle entry point. For a dlc-type resource it points
+# at the compiled archive produced by build_rpf.py.
+main = "stream/dlc.rpf"
+
+# Files streamed to the client. Glob patterns are supported.
+client-files = [
+    "stream/dlc.rpf",
+]
+
+# Disable HTTP CDN compression for the archive: dlc.rpf is already
+# RAGE-compressed and re-compressing it on the fly wastes CPU on the
+# server while saving <1% bandwidth.
+client-cdn-cache = false
+
+# alt:V will refuse to start the resource if these dependencies are
+# absent from the server. Leave empty for a stand-alone pack.
+deps = []

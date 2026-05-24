@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    kraymore_emissive.ytd.xml
+
+    CodeWalker / OpenIV XML representation of the texture dictionary
+    fragment that adds the glowing "kraymore!" branding to a weapon
+    drawable. Drop this into the weapon's .ydr/.yft XML export under
+    the appropriate ShaderGroup item, re-import with CodeWalker, then
+    re-pack the .ytd via OpenIV.
+
+    Two textures are referenced:
+      - <weapon>_diff       : original diffuse, untouched.
+      - kraymore_emissive   : 1024x1024 mask. Black where there is no
+                              glow, white (or chroma-keyed neon) where
+                              the "kraymore!" lettering should emit.
+
+    The shader chosen here is `weapon_normal_spec_detail_palette` —
+    the stock weapon shader in GTA V — extended with an Emissive
+    sampler slot. If your target weapon uses a different base shader
+    (e.g. `weapon_normal_spec` without detail palette), change the
+    `<ShaderName>` element below to match the original.
+-->
+<Item>
+    <ShaderName>weapon_normal_spec_detail_palette</ShaderName>
+    <FileName>kraymore_emissive_material</FileName>
+    <RenderBucket value="0" />
+
+    <Parameters>
+        <Items>
+            <Item name="DiffuseSampler" type="Texture">
+                <Name>w_pi_heavypistol_diff</Name>
+            </Item>
+            <Item name="BumpSampler" type="Texture">
+                <Name>w_pi_heavypistol_n</Name>
+            </Item>
+            <Item name="SpecSampler" type="Texture">
+                <Name>w_pi_heavypistol_s</Name>
+            </Item>
+            <Item name="EmissiveSampler" type="Texture">
+                <Name>kraymore_emissive</Name>
+            </Item>
+
+            <!--
+                Tunables. These match the layout RAGE expects for the
+                emissive-extended weapon shader; values below are a
+                solid neon-magenta starting point for the kraymore
+                lettering on a dark carbon-fibre base.
+            -->
+            <Item name="emissiveMultiplier" type="Vector">
+                <X>4.0</X><Y>4.0</Y><Z>4.0</Z><W>1.0</W>
+            </Item>
+            <Item name="bumpiness" type="Vector">
+                <X>1.0</X><Y>0.0</Y><Z>0.0</Z><W>0.0</W>
+            </Item>
+            <Item name="specularFactor" type="Vector">
+                <X>32.0</X><Y>0.6</Y><Z>0.0</Z><W>0.0</W>
+            </Item>
+
+            <!--
+                Detail map kept at neutral so the carbon-fibre micro
+                pattern stays visible without competing with the
+                emissive layer.
+            -->
+            <Item name="detailSettings" type="Vector">
+                <X>0.0</X><Y>0.0</Y><Z>10.0</Z><W>10.0</W>
+            </Item>
+        </Items>
+    </Parameters>
+</Item>

@@ -1,0 +1,60 @@
+{
+    "name": "kraymore-gunpack",
+    "version": "0.1.0",
+    "description": "Alt:V streamable gunpack — minimalist carbon-fibre weapon retextures with the 'kraymore!' emissive brand.",
+    "target_platforms": ["altv"],
+    "engine": "RAGE / GTA V",
+    "weapons": [
+        {
+            "name": "Heavy Pistol",
+            "weapon_hash": "WEAPON_HEAVYPISTOL",
+            "model_hash": "w_pi_heavypistol",
+            "group": "GROUP_PISTOL",
+            "kraymore_anchor": "rear of slide, under rear sight",
+            "files": ["w_pi_heavypistol.yft", "w_pi_heavypistol.ytd"]
+        },
+        {
+            "name": "Assault Rifle",
+            "weapon_hash": "WEAPON_ASSAULTRIFLE",
+            "model_hash": "w_ar_assaultrifle",
+            "group": "GROUP_RIFLE",
+            "kraymore_anchor": "side of upper receiver",
+            "files": ["w_ar_assaultrifle.yft", "w_ar_assaultrifle.ytd"]
+        },
+        {
+            "name": "Carbine Rifle",
+            "weapon_hash": "WEAPON_CARBINERIFLE",
+            "model_hash": "w_ar_carbinerifle",
+            "group": "GROUP_RIFLE",
+            "kraymore_anchor": "side of upper receiver / optic housing",
+            "files": ["w_ar_carbinerifle.yft", "w_ar_carbinerifle.ytd"]
+        },
+        {
+            "name": "Micro SMG",
+            "weapon_hash": "WEAPON_MICROSMG",
+            "model_hash": "w_sb_microsmg",
+            "group": "GROUP_SMG",
+            "kraymore_anchor": "flat of magwell",
+            "files": ["w_sb_microsmg.yft", "w_sb_microsmg.ytd"]
+        },
+        {
+            "name": "Marksman Rifle",
+            "weapon_hash": "WEAPON_MARKSMANRIFLE",
+            "model_hash": "w_sr_marksmanrifle",
+            "group": "GROUP_SNIPER",
+            "kraymore_anchor": "side of receiver, ahead of scope mount",
+            "files": ["w_sr_marksmanrifle.yft", "w_sr_marksmanrifle.ytd"]
+        }
+    ],
+    "vfx": {
+        "tracers": "weaponfx_kraymore.ypt",
+        "muzzle_flash": "weaponfx_kraymore.ypt"
+    },
+    "branding": {
+        "text": "kraymore!",
+        "technique": "emissive_texture_map",
+        "shader": "weapon_normal_spec_detail_palette",
+        "emissive_texture": "kraymore_emissive",
+        "emissive_multiplier": 4.0
+    }
+}
